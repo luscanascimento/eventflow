@@ -1,8 +1,7 @@
 using EventFlow.Api.Endpoints;
-using EventFlow.Api.Infrastructure;
 using EventFlow.Api.Middleware;
 using EventFlow.Application;
-using EventFlow.Application.Abstractions;
+using EventFlow.Infrastructure;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -18,11 +17,9 @@ builder.Services.AddProblemDetails();
 builder.Services.AddExceptionHandler<GlobalExceptionHandler>();
 builder.Services.AddOpenApi();
 
-// Add Application layer services
+// Add Application and Infrastructure layers
 builder.Services.AddApplication();
-
-// Register In-Memory Store for Phase 1 (Replaced by PostgreSQL EF Core in Phase 2)
-builder.Services.AddSingleton<IEventStore, InMemoryEventStore>();
+builder.Services.AddInfrastructure(builder.Configuration);
 
 var app = builder.Build();
 
