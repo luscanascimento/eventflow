@@ -28,6 +28,7 @@ public static class DependencyInjection
         });
 
         services.AddScoped<IEventStore, EfEventStore>();
+        services.AddScoped<IOutboxStore, EfOutboxStore>();
 
         return services;
     }
