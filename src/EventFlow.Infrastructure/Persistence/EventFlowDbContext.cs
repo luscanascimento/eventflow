@@ -1,4 +1,5 @@
 using EventFlow.Domain.Events;
+using EventFlow.Domain.Idempotency;
 using EventFlow.Domain.Outbox;
 using Microsoft.EntityFrameworkCore;
 
@@ -15,6 +16,7 @@ public sealed class EventFlowDbContext : DbContext
 
     public DbSet<EventRecord> Events => Set<EventRecord>();
     public DbSet<OutboxMessage> OutboxMessages => Set<OutboxMessage>();
+    public DbSet<ProcessedEvent> ProcessedEvents => Set<ProcessedEvent>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {

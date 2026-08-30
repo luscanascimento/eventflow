@@ -1,21 +1,26 @@
+using EventFlow.Application.Abstractions;
 using EventFlow.Domain.Common;
 using Microsoft.Extensions.Logging;
 
 namespace EventFlow.Application.Events.Consumers;
 
 /// <summary>
-/// Default event processor that routes incoming events to matching <see cref="IEventConsumerHandler"/> implementations.
+/// Default event processor that routes incoming events to matching <see cref="IEventConsumerHandler"/> implementations,
+/// protected by distributed idempotency guarantees.
 /// </summary>
 public sealed partial class EventProcessor : IEventProcessor
 {
     private readonly IEnumerable<IEventConsumerHandler> _handlers;
+    private readonly IIdempotencyManager _idempotencyManager;
     private readonly ILogger<EventProcessor> _logger;
 
     public EventProcessor(
         IEnumerable<IEventConsumerHandler> handlers,
+        IIdempotencyManager idempotencyManager,
         ILogger<EventProcessor> logger)
     {
         _handlers = handlers;
+        _idempotencyManager = idempotencyManager;
         _logger = logger;
     }
 
@@ -33,15 +38,58 @@ public sealed partial class EventProcessor : IEventProcessor
             return Result.Success();
         }
 
+        string idempotencyKey = context.Headers.TryGetValue("idempotency_key", out var key) && !string.IsNullOrWhiteSpace(key)
+            ? key
+            : context.EventId.ToString("D");
+
+        string scope = handler.GetType().Name;
+
+        var acquireResult = await _idempotencyManager.TryAcquireAsync(
+            context.TenantId,
+            idempotencyKey,
+            scope,
+            context.EventId,
+            cancellationToken);
+
+        if (acquireResult.IsAlreadyProcessed)
+        {
+            LogEventAlreadyProcessed(_logger, context.EventId, context.EventType, idempotencyKey, scope);
+            return Result.Success();
+        }
+
+        if (acquireResult.IsConflictInFlight)
+        {
+            LogEventConflictInFlight(_logger, context.EventId, context.EventType, idempotencyKey, scope);
+            return Result.Failure(DomainError.Conflict(
+                "Idempotency.ConflictInFlight",
+                $"Another worker is currently processing event '{context.EventId}' with idempotency key '{idempotencyKey}'."));
+        }
+
         try
         {
             var result = await handler.HandleAsync(context, cancellationToken);
             if (result.IsSuccess)
             {
+                await _idempotencyManager.MarkCompletedAsync(
+                    context.TenantId,
+                    idempotencyKey,
+                    scope,
+                    context.EventId,
+                    context.EventType,
+                    "Success",
+                    cancellationToken);
+
                 LogEventProcessedSuccessfully(_logger, context.EventId, context.EventType);
             }
             else
             {
+                await _idempotencyManager.ReleaseLockAsync(
+                    context.TenantId,
+                    idempotencyKey,
+                    scope,
+                    acquireResult.LockToken,
+                    cancellationToken);
+
                 LogEventProcessingFailed(_logger, context.EventId, context.EventType, result.Error.Code, result.Error.Message);
             }
 
@@ -49,6 +97,13 @@ public sealed partial class EventProcessor : IEventProcessor
         }
         catch (Exception ex)
         {
+            await _idempotencyManager.ReleaseLockAsync(
+                context.TenantId,
+                idempotencyKey,
+                scope,
+                acquireResult.LockToken,
+                cancellationToken);
+
             LogUnhandledExceptionDuringProcessing(_logger, context.EventId, context.EventType, ex);
             return Result.Failure(DomainError.Failure("EventProcessor.UnhandledException", ex.Message));
         }
@@ -68,4 +123,10 @@ public sealed partial class EventProcessor : IEventProcessor
 
     [LoggerMessage(EventId = 7005, Level = LogLevel.Error, Message = "Unhandled exception processing event {EventId} of type '{EventType}'")]
     private static partial void LogUnhandledExceptionDuringProcessing(ILogger logger, Guid eventId, string eventType, Exception ex);
+
+    [LoggerMessage(EventId = 7006, Level = LogLevel.Information, Message = "Event {EventId} ('{EventType}') was already processed (Key: '{IdempotencyKey}', Scope: '{Scope}'). Skipping duplicate execution.")]
+    private static partial void LogEventAlreadyProcessed(ILogger logger, Guid eventId, string eventType, string idempotencyKey, string scope);
+
+    [LoggerMessage(EventId = 7007, Level = LogLevel.Warning, Message = "In-flight concurrency conflict for event {EventId} ('{EventType}', Key: '{IdempotencyKey}', Scope: '{Scope}'). Execution deferred.")]
+    private static partial void LogEventConflictInFlight(ILogger logger, Guid eventId, string eventType, string idempotencyKey, string scope);
 }

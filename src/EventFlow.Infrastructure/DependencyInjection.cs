@@ -1,4 +1,5 @@
 using EventFlow.Application.Abstractions;
+using EventFlow.Infrastructure.Idempotency;
 using EventFlow.Infrastructure.Messaging;
 using EventFlow.Infrastructure.Persistence;
 using Microsoft.EntityFrameworkCore;
@@ -39,6 +40,13 @@ public static class DependencyInjection
         services.AddSingleton<IRabbitMqConnection, RabbitMqConnection>();
         services.AddScoped<IEventPublisher, RabbitMqEventPublisher>();
         services.AddSingleton<IRabbitMqConsumer, RabbitMqConsumer>();
+
+        // 3. Redis & Hybrid Idempotency Configuration
+        services.Configure<RedisOptions>(
+            configuration.GetSection(RedisOptions.SectionName));
+
+        services.AddSingleton<IRedisConnection, RedisConnection>();
+        services.AddScoped<IIdempotencyManager, HybridIdempotencyManager>();
 
         return services;
     }

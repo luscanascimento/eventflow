@@ -101,6 +101,61 @@ namespace EventFlow.Infrastructure.Persistence.Migrations
                     b.ToTable("events", (string)null);
                 });
 
+            modelBuilder.Entity("EventFlow.Domain.Idempotency.ProcessedEvent", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uuid")
+                        .HasColumnName("id");
+
+                    b.Property<Guid>("EventId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("event_id");
+
+                    b.Property<string>("EventType")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("character varying(128)")
+                        .HasColumnName("event_type");
+
+                    b.Property<string>("IdempotencyKey")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("character varying(128)")
+                        .HasColumnName("idempotency_key");
+
+                    b.Property<DateTimeOffset>("ProcessedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("processed_at");
+
+                    b.Property<string>("ResultSummary")
+                        .HasMaxLength(512)
+                        .HasColumnType("character varying(512)")
+                        .HasColumnName("result_summary");
+
+                    b.Property<string>("Scope")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("character varying(128)")
+                        .HasColumnName("scope");
+
+                    b.Property<string>("TenantId")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)")
+                        .HasColumnName("tenant_id");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("TenantId", "EventId")
+                        .HasDatabaseName("ix_processed_events_tenant_event_id");
+
+                    b.HasIndex("TenantId", "Scope", "IdempotencyKey")
+                        .IsUnique()
+                        .HasDatabaseName("ix_processed_events_tenant_scope_key");
+
+                    b.ToTable("processed_events", (string)null);
+                });
+
             modelBuilder.Entity("EventFlow.Domain.Outbox.OutboxMessage", b =>
                 {
                     b.Property<Guid>("Id")
