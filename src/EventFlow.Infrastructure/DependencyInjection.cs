@@ -2,7 +2,9 @@ using EventFlow.Application.Abstractions;
 using EventFlow.Infrastructure.Idempotency;
 using EventFlow.Infrastructure.Messaging;
 using EventFlow.Infrastructure.Persistence;
+using EventFlow.Infrastructure.Resilience;
 using Microsoft.EntityFrameworkCore;
+using Polly;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 
@@ -47,6 +49,18 @@ public static class DependencyInjection
 
         services.AddSingleton<IRedisConnection, RedisConnection>();
         services.AddScoped<IIdempotencyManager, HybridIdempotencyManager>();
+
+        // 4. Resilience & External HTTP Dispatching (Polly v8)
+        services.Configure<ResilienceOptions>(
+            configuration.GetSection(ResilienceOptions.SectionName));
+
+        services.AddSingleton<ResiliencePipeline<HttpResponseMessage>>(sp =>
+        {
+            var options = sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<ResilienceOptions>>().Value;
+            return ResiliencePipelineFactory.CreateExternalDispatchPipeline(options);
+        });
+
+        services.AddHttpClient<IExternalDispatcher, HttpExternalDispatcher>();
 
         return services;
     }
