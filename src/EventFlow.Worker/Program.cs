@@ -15,8 +15,9 @@ builder.Services.Configure<OutboxProcessorOptions>(
 builder.Services.AddApplication();
 builder.Services.AddInfrastructure(builder.Configuration);
 
-// Register hosted background service
+// Register hosted background services
 builder.Services.AddHostedService<OutboxDispatcherWorker>();
+builder.Services.AddHostedService<EventConsumerWorker>();
 
 var host = builder.Build();
 host.Run();

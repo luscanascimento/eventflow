@@ -38,6 +38,7 @@ public static class DependencyInjection
 
         services.AddSingleton<IRabbitMqConnection, RabbitMqConnection>();
         services.AddScoped<IEventPublisher, RabbitMqEventPublisher>();
+        services.AddSingleton<IRabbitMqConsumer, RabbitMqConsumer>();
 
         return services;
     }
