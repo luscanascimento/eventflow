@@ -24,3 +24,8 @@ appsettings.Local.json
 ## OS generated
 .DS_Store
 Thumbs.db
+
+## Project local tracking & status
+docs/CURRENT_STATUS.md
+CURRENT_STATUS.md
+
