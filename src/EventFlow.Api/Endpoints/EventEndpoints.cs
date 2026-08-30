@@ -57,7 +57,8 @@ public static class EventEndpoints
         .Produces<IngestEventResponse>(StatusCodes.Status202Accepted)
         .Produces<ProblemDetails>(StatusCodes.Status400BadRequest)
         .Produces<ProblemDetails>(StatusCodes.Status409Conflict)
-        .Produces<ProblemDetails>(StatusCodes.Status500InternalServerError);
+        .Produces<ProblemDetails>(StatusCodes.Status500InternalServerError)
+        .RequireRateLimiting("events-rate-limit");
 
         return endpoints;
     }

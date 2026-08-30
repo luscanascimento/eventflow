@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Text;
 using EventFlow.Application.Abstractions;
 using EventFlow.Domain.Common;
+using EventFlow.Infrastructure.Security;
 using Microsoft.Extensions.Logging;
 using Polly;
 using Polly.CircuitBreaker;
@@ -35,13 +36,12 @@ public sealed partial class HttpExternalDispatcher : IExternalDispatcher
     {
         ArgumentNullException.ThrowIfNull(request);
 
-        // SSRF Defense: validate URI scheme
-        if (!request.TargetUrl.IsAbsoluteUri ||
-            (request.TargetUrl.Scheme != Uri.UriSchemeHttp && request.TargetUrl.Scheme != Uri.UriSchemeHttps))
+        // SSRF Defense: validate URI scheme and safety
+        if (!SsrfGuard.IsSafeTarget(request.TargetUrl, allowPrivateAddresses: true))
         {
             LogInvalidUriScheme(_logger, request.TargetUrl.ToString());
             return Result.Failure<ExternalDispatchResponse>(
-                DomainError.Validation("ExternalDispatcher.InvalidScheme", "Only HTTP and HTTPS URI schemes are permitted."));
+                DomainError.Validation("ExternalDispatcher.InvalidScheme", "Target URL scheme is invalid or blocked by security policies."));
         }
 
         LogDispatching(_logger, request.Method.Method, request.TargetUrl.ToString());

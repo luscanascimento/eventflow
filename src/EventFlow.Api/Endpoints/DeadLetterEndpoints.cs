@@ -10,7 +10,8 @@ public static class DeadLetterEndpoints
     public static IEndpointRouteBuilder MapDeadLetterEndpoints(this IEndpointRouteBuilder app)
     {
         var group = app.MapGroup("/api/v1/dlq")
-            .WithTags("DeadLetterQueue");
+            .WithTags("DeadLetterQueue")
+            .RequireRateLimiting("events-rate-limit");
 
         group.MapGet("/", async (
             int? count,
