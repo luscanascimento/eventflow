@@ -1,5 +1,7 @@
+using System.Diagnostics;
 using EventFlow.Application.Abstractions;
 using EventFlow.Domain.Common;
+using EventFlow.Domain.Diagnostics;
 using EventFlow.Domain.Events;
 using EventFlow.Domain.Outbox;
 using FluentValidation;
@@ -29,10 +31,16 @@ public sealed class IngestEventUseCase
         IngestEventCommand command,
         CancellationToken cancellationToken = default)
     {
+        using var activity = EventFlowDiagnostics.ActivitySource.StartActivity("EventFlow.IngestEvent");
+        activity?.SetTag("eventflow.tenant_id", command.TenantId);
+        activity?.SetTag("eventflow.event_type", command.EventType);
+        activity?.SetTag("eventflow.idempotency_key", command.IdempotencyKey);
+
         var validationResult = await _validator.ValidateAsync(command, cancellationToken);
         if (!validationResult.IsValid)
         {
             var firstError = validationResult.Errors[0];
+            activity?.SetStatus(ActivityStatusCode.Error, firstError.ErrorMessage);
             return Result.Failure<IngestEventResponse>(
                 DomainError.Validation(firstError.PropertyName, firstError.ErrorMessage));
         }
@@ -92,8 +100,17 @@ public sealed class IngestEventUseCase
 
         if (saveResult.IsFailure)
         {
+            activity?.SetStatus(ActivityStatusCode.Error, saveResult.Error.Message);
             return Result.Failure<IngestEventResponse>(saveResult.Error);
         }
+
+        EventFlowDiagnostics.EventsIngested.Add(
+            1,
+            new KeyValuePair<string, object?>("tenant_id", command.TenantId),
+            new KeyValuePair<string, object?>("event_type", command.EventType));
+
+        activity?.SetTag("eventflow.event_id", envelope.EventId.ToString("D"));
+        activity?.SetStatus(ActivityStatusCode.Ok);
 
         return Result.Success(new IngestEventResponse(
             EventId: envelope.EventId,

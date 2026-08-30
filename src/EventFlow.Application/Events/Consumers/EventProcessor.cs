@@ -1,12 +1,14 @@
+using System.Diagnostics;
 using EventFlow.Application.Abstractions;
 using EventFlow.Domain.Common;
+using EventFlow.Domain.Diagnostics;
 using Microsoft.Extensions.Logging;
 
 namespace EventFlow.Application.Events.Consumers;
 
 /// <summary>
 /// Default event processor that routes incoming events to matching <see cref="IEventConsumerHandler"/> implementations,
-/// protected by distributed idempotency guarantees.
+/// protected by distributed idempotency guarantees and OpenTelemetry tracing.
 /// </summary>
 public sealed partial class EventProcessor : IEventProcessor
 {
@@ -28,13 +30,31 @@ public sealed partial class EventProcessor : IEventProcessor
     {
         ArgumentNullException.ThrowIfNull(context);
 
+        ActivityContext parentContext = default;
+        if (!string.IsNullOrWhiteSpace(context.TraceParent) &&
+            ActivityContext.TryParse(context.TraceParent, null, out var parsedParent))
+        {
+            parentContext = parsedParent;
+        }
+
+        using var activity = EventFlowDiagnostics.ActivitySource.StartActivity(
+            "EventFlow.ConsumerProcess",
+            ActivityKind.Consumer,
+            parentContext);
+
+        activity?.SetTag("eventflow.event_id", context.EventId.ToString("D"));
+        activity?.SetTag("eventflow.event_type", context.EventType);
+        activity?.SetTag("eventflow.tenant_id", context.TenantId);
+
+        var stopwatch = Stopwatch.StartNew();
+
         LogProcessingEvent(_logger, context.EventId, context.EventType, context.TenantId);
 
         var handler = _handlers.FirstOrDefault(h => h.CanHandle(context.EventType));
         if (handler == null)
         {
             LogNoHandlerFound(_logger, context.EventType, context.EventId);
-            // Non-handled event types are acknowledged without error to prevent blocking message flow
+            activity?.SetStatus(ActivityStatusCode.Ok, "NoHandlerFound");
             return Result.Success();
         }
 
@@ -43,6 +63,8 @@ public sealed partial class EventProcessor : IEventProcessor
             : context.EventId.ToString("D");
 
         string scope = handler.GetType().Name;
+        activity?.SetTag("eventflow.idempotency_key", idempotencyKey);
+        activity?.SetTag("eventflow.scope", scope);
 
         var acquireResult = await _idempotencyManager.TryAcquireAsync(
             context.TenantId,
@@ -53,12 +75,23 @@ public sealed partial class EventProcessor : IEventProcessor
 
         if (acquireResult.IsAlreadyProcessed)
         {
+            EventFlowDiagnostics.IdempotencyHits.Add(
+                1,
+                new KeyValuePair<string, object?>("tenant_id", context.TenantId),
+                new KeyValuePair<string, object?>("scope", scope));
+
+            activity?.SetTag("eventflow.idempotency_status", "AlreadyProcessed");
+            activity?.SetStatus(ActivityStatusCode.Ok);
+
             LogEventAlreadyProcessed(_logger, context.EventId, context.EventType, idempotencyKey, scope);
             return Result.Success();
         }
 
         if (acquireResult.IsConflictInFlight)
         {
+            activity?.SetTag("eventflow.idempotency_status", "ConflictInFlight");
+            activity?.SetStatus(ActivityStatusCode.Error, "ConflictInFlight");
+
             LogEventConflictInFlight(_logger, context.EventId, context.EventType, idempotencyKey, scope);
             return Result.Failure(DomainError.Conflict(
                 "Idempotency.ConflictInFlight",
@@ -68,6 +101,12 @@ public sealed partial class EventProcessor : IEventProcessor
         try
         {
             var result = await handler.HandleAsync(context, cancellationToken);
+            stopwatch.Stop();
+
+            EventFlowDiagnostics.EventProcessingDuration.Record(
+                stopwatch.Elapsed.TotalMilliseconds,
+                new KeyValuePair<string, object?>("event_type", context.EventType));
+
             if (result.IsSuccess)
             {
                 await _idempotencyManager.MarkCompletedAsync(
@@ -79,6 +118,13 @@ public sealed partial class EventProcessor : IEventProcessor
                     "Success",
                     cancellationToken);
 
+                EventFlowDiagnostics.EventsProcessed.Add(
+                    1,
+                    new KeyValuePair<string, object?>("tenant_id", context.TenantId),
+                    new KeyValuePair<string, object?>("event_type", context.EventType),
+                    new KeyValuePair<string, object?>("status", "success"));
+
+                activity?.SetStatus(ActivityStatusCode.Ok);
                 LogEventProcessedSuccessfully(_logger, context.EventId, context.EventType);
             }
             else
@@ -90,6 +136,13 @@ public sealed partial class EventProcessor : IEventProcessor
                     acquireResult.LockToken,
                     cancellationToken);
 
+                EventFlowDiagnostics.EventsProcessed.Add(
+                    1,
+                    new KeyValuePair<string, object?>("tenant_id", context.TenantId),
+                    new KeyValuePair<string, object?>("event_type", context.EventType),
+                    new KeyValuePair<string, object?>("status", "failure"));
+
+                activity?.SetStatus(ActivityStatusCode.Error, result.Error.Message);
                 LogEventProcessingFailed(_logger, context.EventId, context.EventType, result.Error.Code, result.Error.Message);
             }
 
@@ -97,6 +150,14 @@ public sealed partial class EventProcessor : IEventProcessor
         }
         catch (Exception ex)
         {
+            stopwatch.Stop();
+
+            EventFlowDiagnostics.EventsProcessed.Add(
+                1,
+                new KeyValuePair<string, object?>("tenant_id", context.TenantId),
+                new KeyValuePair<string, object?>("event_type", context.EventType),
+                new KeyValuePair<string, object?>("status", "exception"));
+
             await _idempotencyManager.ReleaseLockAsync(
                 context.TenantId,
                 idempotencyKey,
@@ -104,6 +165,7 @@ public sealed partial class EventProcessor : IEventProcessor
                 acquireResult.LockToken,
                 cancellationToken);
 
+            activity?.SetStatus(ActivityStatusCode.Error, ex.Message);
             LogUnhandledExceptionDuringProcessing(_logger, context.EventId, context.EventType, ex);
             return Result.Failure(DomainError.Failure("EventProcessor.UnhandledException", ex.Message));
         }

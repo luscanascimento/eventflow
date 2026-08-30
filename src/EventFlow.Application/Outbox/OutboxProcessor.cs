@@ -1,5 +1,6 @@
 using EventFlow.Application.Abstractions;
 using EventFlow.Domain.Common;
+using EventFlow.Domain.Diagnostics;
 using EventFlow.Domain.Outbox;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -47,6 +48,9 @@ public sealed partial class OutboxProcessor
 
         LogBatchProcessingStarted(_logger, messages.Count);
 
+        using var batchActivity = EventFlowDiagnostics.ActivitySource.StartActivity("EventFlow.OutboxBatchDispatch");
+        batchActivity?.SetTag("eventflow.outbox.batch_size", messages.Count);
+
         foreach (var message in messages)
         {
             if (cancellationToken.IsCancellationRequested)
@@ -74,6 +78,11 @@ public sealed partial class OutboxProcessor
             if (publishResult.IsSuccess)
             {
                 message.MarkPublished(_dateTimeProvider.UtcNow);
+                EventFlowDiagnostics.OutboxDispatched.Add(
+                    1,
+                    new KeyValuePair<string, object?>("status", "published"),
+                    new KeyValuePair<string, object?>("event_type", message.EventType));
+
                 LogMessagePublished(_logger, message.Id, message.EventType, message.TenantId);
             }
             else
@@ -83,10 +92,20 @@ public sealed partial class OutboxProcessor
 
                 if (message.Status == OutboxStatus.DeadLettered)
                 {
+                    EventFlowDiagnostics.OutboxDispatched.Add(
+                        1,
+                        new KeyValuePair<string, object?>("status", "dead_lettered"),
+                        new KeyValuePair<string, object?>("event_type", message.EventType));
+
                     LogMessageDeadLettered(_logger, message.Id, message.EventType, publishResult.Error.Message, message.RetryCount);
                 }
                 else
                 {
+                    EventFlowDiagnostics.OutboxDispatched.Add(
+                        1,
+                        new KeyValuePair<string, object?>("status", "failed_retry"),
+                        new KeyValuePair<string, object?>("event_type", message.EventType));
+
                     LogMessageFailedAndScheduledRetry(_logger, message.Id, message.EventType, publishResult.Error.Message, message.RetryCount, message.NextRetryAt);
                 }
             }

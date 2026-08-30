@@ -154,6 +154,11 @@ public sealed partial class RabbitMqDeadLetterManager : IDeadLetterManager
             }
         }
 
+        if (replayedCount > 0)
+        {
+            EventFlow.Domain.Diagnostics.EventFlowDiagnostics.DlqReplayed.Add(replayedCount);
+        }
+
         LogReplayedBatch(_logger, replayedCount, _options.ExchangeName);
         return Result.Success(replayedCount);
     }
@@ -164,6 +169,11 @@ public sealed partial class RabbitMqDeadLetterManager : IDeadLetterManager
         {
             await using var channel = await _connection.CreateChannelAsync(cancellationToken);
             uint purgedCount = await channel.QueuePurgeAsync(_options.DlqQueueName, cancellationToken);
+
+            if (purgedCount > 0)
+            {
+                EventFlow.Domain.Diagnostics.EventFlowDiagnostics.DlqPurged.Add(purgedCount);
+            }
 
             LogPurgedDlq(_logger, purgedCount, _options.DlqQueueName);
             return Result.Success(purgedCount);

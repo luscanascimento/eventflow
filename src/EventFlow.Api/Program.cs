@@ -2,6 +2,7 @@ using EventFlow.Api.Endpoints;
 using EventFlow.Api.Middleware;
 using EventFlow.Application;
 using EventFlow.Infrastructure;
+using EventFlow.Infrastructure.Telemetry;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -17,9 +18,10 @@ builder.Services.AddProblemDetails();
 builder.Services.AddExceptionHandler<GlobalExceptionHandler>();
 builder.Services.AddOpenApi();
 
-// Add Application and Infrastructure layers
+// Add Application, Infrastructure, and Telemetry layers
 builder.Services.AddApplication();
 builder.Services.AddInfrastructure(builder.Configuration);
+builder.Services.AddEventFlowTelemetry(builder.Configuration, "EventFlow.Api");
 
 var app = builder.Build();
 
