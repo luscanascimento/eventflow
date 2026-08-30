@@ -1,4 +1,5 @@
 using EventFlow.Application.Abstractions;
+using EventFlow.Infrastructure.DeadLetter;
 using EventFlow.Infrastructure.Idempotency;
 using EventFlow.Infrastructure.Messaging;
 using EventFlow.Infrastructure.Persistence;
@@ -35,13 +36,14 @@ public static class DependencyInjection
         services.AddScoped<IEventStore, EfEventStore>();
         services.AddScoped<IOutboxStore, EfOutboxStore>();
 
-        // 2. RabbitMQ Messaging Configuration
+        // 2. RabbitMQ Messaging & DLQ Configuration
         services.Configure<RabbitMqOptions>(
             configuration.GetSection(RabbitMqOptions.SectionName));
 
         services.AddSingleton<IRabbitMqConnection, RabbitMqConnection>();
         services.AddScoped<IEventPublisher, RabbitMqEventPublisher>();
         services.AddSingleton<IRabbitMqConsumer, RabbitMqConsumer>();
+        services.AddScoped<IDeadLetterManager, RabbitMqDeadLetterManager>();
 
         // 3. Redis & Hybrid Idempotency Configuration
         services.Configure<RedisOptions>(

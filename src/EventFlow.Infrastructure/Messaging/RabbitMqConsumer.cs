@@ -51,13 +51,42 @@ public sealed partial class RabbitMqConsumer : IRabbitMqConsumer
 
             _channel = await _connection.CreateChannelAsync(cancellationToken);
 
-            // 1. Declare Durable Queue
+            // 1. Declare Dead Letter Exchange (DLX) & Dead Letter Queue (DLQ)
+            await _channel.ExchangeDeclareAsync(
+                exchange: _options.DlxExchangeName,
+                type: ExchangeType.Topic,
+                durable: true,
+                autoDelete: false,
+                arguments: null,
+                cancellationToken: cancellationToken);
+
+            await _channel.QueueDeclareAsync(
+                queue: _options.DlqQueueName,
+                durable: true,
+                exclusive: false,
+                autoDelete: false,
+                arguments: null,
+                cancellationToken: cancellationToken);
+
+            await _channel.QueueBindAsync(
+                queue: _options.DlqQueueName,
+                exchange: _options.DlxExchangeName,
+                routingKey: "#",
+                arguments: null,
+                cancellationToken: cancellationToken);
+
+            // 2. Declare Durable Processing Queue with Dead Letter routing
+            var queueArguments = new Dictionary<string, object?>
+            {
+                ["x-dead-letter-exchange"] = _options.DlxExchangeName
+            };
+
             await _channel.QueueDeclareAsync(
                 queue: _options.QueueName,
                 durable: true,
                 exclusive: false,
                 autoDelete: false,
-                arguments: null,
+                arguments: queueArguments,
                 cancellationToken: cancellationToken);
 
             // 2. Bind Queue to Topic Exchange

@@ -15,6 +15,8 @@ public sealed class RabbitMqOptions
     public string ExchangeName { get; set; } = "eventflow.events";
     public string QueueName { get; set; } = "eventflow.events.processing";
     public string RoutingKeyPattern { get; set; } = "#";
+    public string DlxExchangeName { get; set; } = "eventflow.dlx";
+    public string DlqQueueName { get; set; } = "eventflow.events.dlq";
     public ushort PrefetchCount { get; set; } = 10;
     public string ClientProvidedName { get; set; } = "eventflow-service";
     public int RequestedHeartbeatSeconds { get; set; } = 60;

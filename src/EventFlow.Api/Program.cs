@@ -36,6 +36,7 @@ app.UseHttpsRedirection();
 // Map Endpoints
 app.MapHealthEndpoints();
 app.MapEventEndpoints();
+app.MapDeadLetterEndpoints();
 
 app.Run();
 
