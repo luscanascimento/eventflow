@@ -1,3 +1,4 @@
+using EventFlow.Api.Security;
 using EventFlow.Application.Abstractions;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
@@ -11,7 +12,8 @@ public static class DeadLetterEndpoints
     {
         var group = app.MapGroup("/api/v1/dlq")
             .WithTags("DeadLetterQueue")
-            .RequireRateLimiting("events-rate-limit");
+            .RequireRateLimiting("events-rate-limit")
+            .AddEndpointFilter<ApiKeyEndpointFilter>();
 
         group.MapGet("/", async (
             int? count,

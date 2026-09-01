@@ -1,3 +1,4 @@
+using EventFlow.Api.Security;
 using EventFlow.Application.Events.Commands;
 using EventFlow.Domain.Common;
 using Microsoft.AspNetCore.Mvc;
@@ -9,7 +10,8 @@ public static class EventEndpoints
     public static IEndpointRouteBuilder MapEventEndpoints(this IEndpointRouteBuilder endpoints)
     {
         var group = endpoints.MapGroup("/api/v1/events")
-            .WithTags("Events");
+            .WithTags("Events")
+            .AddEndpointFilter<ApiKeyEndpointFilter>();
 
         group.MapPost("/", async (
             [FromBody] IngestEventCommand command,
