@@ -6,10 +6,10 @@
 [![RabbitMQ](https://img.shields.io/badge/RabbitMQ-3.13-FF6600.svg)](https://www.rabbitmq.com/)
 [![Redis](https://img.shields.io/badge/Redis-7-DC382D.svg)](https://redis.io/)
 [![OpenTelemetry](https://img.shields.io/badge/OpenTelemetry-Enabled-orange.svg)](https://opentelemetry.io/)
-[![Tests](https://img.shields.io/badge/Tests-157%20Passed-brightgreen.svg)]()
+[![Tests](https://img.shields.io/badge/Tests-206%20Passed%20(184%20Unit%20%2B%2022%20Integration)-brightgreen.svg)]()
 [![Code Quality](https://img.shields.io/badge/Warnings-0%20(TreatAsErrors)-success.svg)]()
 
-> 🚀 **Status:** Arquitetura completa, robusta e testada (Fases 1 a 13 concluídas).
+> 🚀 **Status:** Arquitetura completa, robusta e auditada contra engenharia de caos (Todas as 14 Fases concluídas — Approved for Production).
 
 O **EventFlow** é um sistema distribuído e *event-driven* projetado para a ingestão confiável, persistência transacional atômica, roteamento por tópicos e processamento assíncrono resiliente de eventos de negócio e webhooks críticos (como liquidações financeiras e notificações de parceiros).
 
