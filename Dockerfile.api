@@ -1,0 +1,61 @@
+# ==============================================================================
+# Stage 1: Build & Publish (Multi-Stage SDK)
+# ==============================================================================
+FROM mcr.microsoft.com/dotnet/sdk:9.0-alpine AS build
+WORKDIR /src
+
+# Copy solution and project files first to maximize Docker layer caching
+COPY Directory.Build.props ./
+COPY EventFlow.sln ./
+COPY src/EventFlow.Domain/EventFlow.Domain.csproj src/EventFlow.Domain/
+COPY src/EventFlow.Application/EventFlow.Application.csproj src/EventFlow.Application/
+COPY src/EventFlow.Infrastructure/EventFlow.Infrastructure.csproj src/EventFlow.Infrastructure/
+COPY src/EventFlow.Worker/EventFlow.Worker.csproj src/EventFlow.Worker/
+COPY src/EventFlow.Api/EventFlow.Api.csproj src/EventFlow.Api/
+COPY tests/EventFlow.UnitTests/EventFlow.UnitTests.csproj tests/EventFlow.UnitTests/
+COPY tests/EventFlow.IntegrationTests/EventFlow.IntegrationTests.csproj tests/EventFlow.IntegrationTests/
+
+# Restore dependencies
+RUN dotnet restore src/EventFlow.Api/EventFlow.Api.csproj
+
+# Copy remaining source code
+COPY src/ src/
+
+# Build and publish release binaries without symbols
+RUN dotnet publish src/EventFlow.Api/EventFlow.Api.csproj \
+    -c Release \
+    -o /app/publish \
+    /p:UseAppHost=false \
+    /p:DebugType=None \
+    /p:DebugSymbols=false \
+    --no-restore
+
+# ==============================================================================
+# Stage 2: Hardened Non-Root Runtime
+# ==============================================================================
+FROM mcr.microsoft.com/dotnet/aspnet:9.0-alpine AS final
+WORKDIR /app
+
+# Install required globalization and timezone libraries
+RUN apk add --no-cache icu-libs tzdata
+
+# Configure environment variables
+ENV ASPNETCORE_HTTP_PORTS=8080 \
+    DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=false \
+    LC_ALL=en_US.UTF-8 \
+    LANG=en_US.UTF-8
+
+# Copy compiled application with non-root ownership (app user uid: 1654 built-in)
+COPY --from=build --chown=app:app /app/publish .
+
+# Expose standard unprivileged port
+EXPOSE 8080
+
+# Healthcheck probe against live health endpoint
+HEALTHCHECK --interval=15s --timeout=5s --start-period=5s --retries=3 \
+    CMD wget --no-verbose --tries=1 --spider http://localhost:8080/health/live || exit 1
+
+# Run strictly as unprivileged non-root user
+USER app
+
+ENTRYPOINT ["dotnet", "EventFlow.Api.dll"]
