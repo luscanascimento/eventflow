@@ -39,7 +39,7 @@ public sealed class AdversarialSecurityAuditTests
     public void SsrfGuard_WhenMaliciousOrPrivateTarget_MustBlock(string targetUrl)
     {
         var uri = new Uri(targetUrl);
-        bool isSafe = SsrfGuard.IsSafeTarget(uri, allowPrivateAddresses: false);
+        bool isSafe = SsrfGuard.IsSafeTarget(uri);
 
         isSafe.Should().BeFalse($"Target '{targetUrl}' represents a private/loopback/cloud metadata attack vector and must be blocked.");
     }
@@ -55,7 +55,7 @@ public sealed class AdversarialSecurityAuditTests
     public void SsrfGuard_WhenDangerousUriScheme_MustBlock(string targetUrl)
     {
         var uri = new Uri(targetUrl);
-        bool isSafe = SsrfGuard.IsSafeTarget(uri, allowPrivateAddresses: true);
+        bool isSafe = SsrfGuard.IsSafeTarget(uri);
 
         isSafe.Should().BeFalse($"Scheme in '{targetUrl}' is non-HTTP and must be blocked to prevent arbitrary protocol smuggling.");
     }

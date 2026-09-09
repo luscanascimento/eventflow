@@ -40,6 +40,20 @@ public sealed class ProcessedEventConfiguration : IEntityTypeConfiguration<Proce
             .HasMaxLength(128)
             .IsRequired();
 
+        builder.Property(e => e.Status)
+            .HasColumnName("status")
+            .HasConversion<string>()
+            .HasMaxLength(32)
+            .HasDefaultValue(ProcessedEventStatus.Completed)
+            .IsRequired();
+
+        builder.Property(e => e.LockToken)
+            .HasColumnName("lock_token")
+            .HasMaxLength(64);
+
+        builder.Property(e => e.LockedUntilUtc)
+            .HasColumnName("locked_until_utc");
+
         builder.Property(e => e.ResultSummary)
             .HasColumnName("result_summary")
             .HasMaxLength(512);
@@ -56,5 +70,8 @@ public sealed class ProcessedEventConfiguration : IEntityTypeConfiguration<Proce
         // Index for querying by EventId within a Tenant
         builder.HasIndex(e => new { e.TenantId, e.EventId })
             .HasDatabaseName("ix_processed_events_tenant_event_id");
+
+        builder.HasIndex(e => new { e.Status, e.LockedUntilUtc })
+            .HasDatabaseName("ix_processed_events_status_locked_until");
     }
 }

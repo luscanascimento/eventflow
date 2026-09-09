@@ -2,6 +2,7 @@ using System.Data.Common;
 using EventFlow.Application.Abstractions;
 using EventFlow.Domain.Common;
 using EventFlow.Domain.Outbox;
+using EventFlow.Infrastructure.Messaging;
 using EventFlow.Infrastructure.Persistence;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
@@ -25,6 +26,7 @@ public sealed class EventFlowApiFactory : WebApplicationFactory<Program>, IAsync
 
     public IEventPublisher PublisherMock { get; } = Substitute.For<IEventPublisher>();
     public IDeadLetterManager DeadLetterManagerMock { get; } = Substitute.For<IDeadLetterManager>();
+    public IRabbitMqConnection RabbitMqConnectionMock { get; } = Substitute.For<IRabbitMqConnection>();
 
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
@@ -74,6 +76,11 @@ public sealed class EventFlowApiFactory : WebApplicationFactory<Program>, IAsync
 
             services.RemoveAll<IDeadLetterManager>();
             services.AddScoped(_ => DeadLetterManagerMock);
+
+            // Replace RabbitMqConnection with mock
+            RabbitMqConnectionMock.IsConnected.Returns(true);
+            services.RemoveAll<IRabbitMqConnection>();
+            services.AddSingleton(_ => RabbitMqConnectionMock);
         });
 
         builder.UseEnvironment("Testing");

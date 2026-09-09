@@ -17,9 +17,9 @@ Decidimos implementar uma **Estratégia de Segurança Defensiva por Padrão (*Se
 ### 1. Limite Estrito de Payloads no Kestrel:
 * `MaxRequestBodySize = 256 KB` configurado no Kestrel. Requisições maiores são rejeitadas imediatamente no nível de transporte antes da alocação de buffers.
 
-### 2. Rate Limiting Granular Baseado em Particionamento:
+### 2. Rate Limiting Granular Baseado em Particionamento Composto:
 * Algoritmo: **Sliding Window Rate Limiter** no ASP.NET Core.
-* Particionamento: Chave composta por `X-Tenant-Id` (com fallback para `RemoteIpAddress`).
+* Particionamento: Chave composta por `IP:TenantHeader` (ex: `192.168.1.10:tenant_acme`), garantindo isolamento justo entre múltiplos clientes compartilhando a mesma rede ou um mesmo tenant operando em múltiplos nós.
 * Resposta: HTTP `429 Too Many Requests` estruturada no padrão RFC 7807 `ProblemDetails`.
 
 ### 3. Middleware de Headers de Segurança (OWASP Standard):
@@ -31,12 +31,14 @@ Decidimos implementar uma **Estratégia de Segurança Defensiva por Padrão (*Se
 * `Permissions-Policy`: Restringe APIs de hardware e sensores do navegador.
 * Remoção dos headers `Server` e `X-Powered-By`.
 
-### 4. Proteção contra Timing Attacks em API Keys:
-* Implementação do `ApiKeyValidator` utilizando `CryptographicOperations.FixedTimeEquals` para comparações em tempo constante, eliminando variações de latência exploráveis.
+### 4. Proteção contra Timing Attacks & Fail-Closed em API Keys:
+* Implementação do `ApiKeyValidator` utilizando `CryptographicOperations.FixedTimeEquals` comparando hashes SHA-256 dos segredos, eliminando vazamentos de temporização tanto por conteúdo quanto por tamanho de chave.
+* `SecurityOptions.ValidateOnStart()` bloqueia a inicialização da API em ambientes não-Development caso a chave não esteja configurada ou possua entropia insuficiente (< 16 caracteres).
 
-### 5. Defesa contra SSRF (`SsrfGuard`):
+### 5. Defesa contra SSRF e DNS Rebinding (`SsrfGuard` + `SafeSocketsHttpHandler`):
 * Validação estrita de esquemas de URL (permitindo apenas `http` e `https`).
-* Bloqueio ativo de resoluções para redes privadas RFC 1918 (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`), loopback (`127.0.0.0/8`, `::1`) e metadados de nuvem (`169.254.169.254`).
+* Bloqueio ativo de resoluções para redes privadas RFC 1918 (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`), loopback (`127.0.0.0/8`, `::1`), link-local e metadados de nuvem (`169.254.169.254`).
+* Criação de `SocketsHttpHandler` seguro com callback `ConnectCallback` que valida o IP de destino no momento exato do estabelecimento do socket, impedindo ataques de **DNS Rebinding** (onde o domínio aponta para um IP público na checagem e resolve para um IP privado na conexão).
 
 ### 6. Higiene Estrita de Segredos e Logs:
 * Proibição absoluta de segredos codificados no repositório.

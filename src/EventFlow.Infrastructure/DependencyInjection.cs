@@ -4,10 +4,12 @@ using EventFlow.Infrastructure.Idempotency;
 using EventFlow.Infrastructure.Messaging;
 using EventFlow.Infrastructure.Persistence;
 using EventFlow.Infrastructure.Resilience;
+using EventFlow.Infrastructure.Security;
 using Microsoft.EntityFrameworkCore;
-using Polly;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Options;
+using Polly;
 
 namespace EventFlow.Infrastructure;
 
@@ -52,17 +54,24 @@ public static class DependencyInjection
         services.AddSingleton<IRedisConnection, RedisConnection>();
         services.AddScoped<IIdempotencyManager, HybridIdempotencyManager>();
 
-        // 4. Resilience & External HTTP Dispatching (Polly v8)
+        // 4. Resilience & SSRF Configuration
         services.Configure<ResilienceOptions>(
             configuration.GetSection(ResilienceOptions.SectionName));
+        services.Configure<SsrfOptions>(
+            configuration.GetSection(SsrfOptions.SectionName));
 
         services.AddSingleton<ResiliencePipeline<HttpResponseMessage>>(sp =>
         {
-            var options = sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<ResilienceOptions>>().Value;
+            var options = sp.GetRequiredService<IOptions<ResilienceOptions>>().Value;
             return ResiliencePipelineFactory.CreateExternalDispatchPipeline(options);
         });
 
-        services.AddHttpClient<IExternalDispatcher, HttpExternalDispatcher>();
+        services.AddHttpClient<IExternalDispatcher, HttpExternalDispatcher>()
+            .ConfigurePrimaryHttpMessageHandler(sp =>
+            {
+                var ssrfOptions = sp.GetRequiredService<IOptions<SsrfOptions>>().Value;
+                return SsrfGuard.CreateSafeSocketsHttpHandler(ssrfOptions);
+            });
 
         return services;
     }

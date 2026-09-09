@@ -2,8 +2,10 @@ using System.Net;
 using EventFlow.Application.Abstractions;
 using EventFlow.Domain.Common;
 using EventFlow.Infrastructure.Resilience;
+using EventFlow.Infrastructure.Security;
 using FluentAssertions;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using NSubstitute;
 using Polly;
 using Xunit;
@@ -45,6 +47,10 @@ public sealed class HttpExternalDispatcherTests : IDisposable
         AttemptTimeoutSeconds = 2,
         TotalTimeoutSeconds = 5
     };
+    private readonly IOptions<SsrfOptions> _ssrfOptions = Options.Create(new SsrfOptions
+    {
+        AllowedHosts = { "api.partner.com" }
+    });
     private readonly ResiliencePipeline<HttpResponseMessage> _pipeline;
     private readonly HttpExternalDispatcher _sut;
 
@@ -52,7 +58,7 @@ public sealed class HttpExternalDispatcherTests : IDisposable
     {
         _httpClient = new HttpClient(_handler);
         _pipeline = ResiliencePipelineFactory.CreateExternalDispatchPipeline(_options);
-        _sut = new HttpExternalDispatcher(_httpClient, _pipeline, _logger);
+        _sut = new HttpExternalDispatcher(_httpClient, _pipeline, _ssrfOptions, _logger);
     }
 
     [Theory]
@@ -69,7 +75,7 @@ public sealed class HttpExternalDispatcherTests : IDisposable
         var result = await _sut.DispatchAsync(request);
 
         result.IsFailure.Should().BeTrue();
-        result.Error.Code.Should().Be("ExternalDispatcher.InvalidScheme");
+        result.Error.Code.Should().Be("ExternalDispatcher.BlockedTarget");
         result.Error.Type.Should().Be(ErrorType.Validation);
     }
 

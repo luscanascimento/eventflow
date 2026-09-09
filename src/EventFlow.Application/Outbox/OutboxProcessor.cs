@@ -8,10 +8,13 @@ using Microsoft.Extensions.Options;
 namespace EventFlow.Application.Outbox;
 
 /// <summary>
-/// Core application service responsible for fetching, publishing, and updating status of pending outbox messages.
+/// Core application service responsible for claiming, publishing, and managing lease lifecycle of pending outbox messages.
+/// Enforces at-least-once delivery without holding long-lived database transactions during broker network dispatches.
 /// </summary>
 public sealed partial class OutboxProcessor
 {
+    private static readonly TimeSpan DefaultLeaseDuration = TimeSpan.FromSeconds(30);
+
     private readonly IOutboxStore _outboxStore;
     private readonly IEventPublisher _publisher;
     private readonly IDateTimeProvider _dateTimeProvider;
@@ -35,9 +38,12 @@ public sealed partial class OutboxProcessor
     public async Task<int> ProcessPendingMessagesAsync(CancellationToken cancellationToken = default)
     {
         DateTimeOffset now = _dateTimeProvider.UtcNow;
+        string lockToken = Guid.NewGuid().ToString("N");
 
-        var messages = await _outboxStore.FetchPendingBatchAsync(
+        var messages = await _outboxStore.ClaimPendingBatchAsync(
             _options.BatchSize,
+            lockToken,
+            DefaultLeaseDuration,
             now,
             cancellationToken);
 
@@ -58,13 +64,6 @@ public sealed partial class OutboxProcessor
                 break;
             }
 
-            var processingResult = message.MarkProcessing();
-            if (processingResult.IsFailure)
-            {
-                LogMessageSkipped(_logger, message.Id, processingResult.Error.Message);
-                continue;
-            }
-
             Result publishResult;
             try
             {
@@ -77,41 +76,60 @@ public sealed partial class OutboxProcessor
 
             if (publishResult.IsSuccess)
             {
-                message.MarkPublished(_dateTimeProvider.UtcNow);
-                EventFlowDiagnostics.OutboxDispatched.Add(
-                    1,
-                    new KeyValuePair<string, object?>("status", "published"),
-                    new KeyValuePair<string, object?>("event_type", message.EventType));
+                var markResult = await _outboxStore.MarkPublishedAsync(message.Id, lockToken, _dateTimeProvider.UtcNow, cancellationToken);
+                if (markResult.IsSuccess)
+                {
+                    EventFlowDiagnostics.OutboxDispatched.Add(
+                        1,
+                        new KeyValuePair<string, object?>("status", "published"),
+                        new KeyValuePair<string, object?>("event_type", message.EventType));
 
-                LogMessagePublished(_logger, message.Id, message.EventType, message.TenantId);
+                    LogMessagePublished(_logger, message.Id, message.EventType, message.TenantId);
+                }
+                else
+                {
+                    LogLeaseLost(_logger, message.Id, markResult.Error.Message);
+                }
             }
             else
             {
                 var backoff = CalculateExponentialBackoff(message.RetryCount);
-                message.MarkFailed(publishResult.Error.Message, _options.MaxRetries, backoff, _dateTimeProvider.UtcNow);
+                var markResult = await _outboxStore.MarkFailedAsync(
+                    message.Id,
+                    lockToken,
+                    publishResult.Error.Message,
+                    _options.MaxRetries,
+                    backoff,
+                    _dateTimeProvider.UtcNow,
+                    cancellationToken);
 
-                if (message.Status == OutboxStatus.DeadLettered)
+                if (markResult.IsSuccess)
                 {
-                    EventFlowDiagnostics.OutboxDispatched.Add(
-                        1,
-                        new KeyValuePair<string, object?>("status", "dead_lettered"),
-                        new KeyValuePair<string, object?>("event_type", message.EventType));
+                    if (message.RetryCount + 1 >= _options.MaxRetries)
+                    {
+                        EventFlowDiagnostics.OutboxDispatched.Add(
+                            1,
+                            new KeyValuePair<string, object?>("status", "dead_lettered"),
+                            new KeyValuePair<string, object?>("event_type", message.EventType));
 
-                    LogMessageDeadLettered(_logger, message.Id, message.EventType, publishResult.Error.Message, message.RetryCount);
+                        LogMessageDeadLettered(_logger, message.Id, message.EventType, publishResult.Error.Message, message.RetryCount + 1);
+                    }
+                    else
+                    {
+                        EventFlowDiagnostics.OutboxDispatched.Add(
+                            1,
+                            new KeyValuePair<string, object?>("status", "failed_retry"),
+                            new KeyValuePair<string, object?>("event_type", message.EventType));
+
+                        LogMessageFailedAndScheduledRetry(_logger, message.Id, message.EventType, publishResult.Error.Message, message.RetryCount + 1, now.Add(backoff));
+                    }
                 }
                 else
                 {
-                    EventFlowDiagnostics.OutboxDispatched.Add(
-                        1,
-                        new KeyValuePair<string, object?>("status", "failed_retry"),
-                        new KeyValuePair<string, object?>("event_type", message.EventType));
-
-                    LogMessageFailedAndScheduledRetry(_logger, message.Id, message.EventType, publishResult.Error.Message, message.RetryCount, message.NextRetryAt);
+                    LogLeaseLost(_logger, message.Id, markResult.Error.Message);
                 }
             }
         }
-
-        await _outboxStore.SaveChangesAsync(cancellationToken);
 
         LogBatchProcessingFinished(_logger, messages.Count);
         return messages.Count;
@@ -124,11 +142,11 @@ public sealed partial class OutboxProcessor
         return TimeSpan.FromSeconds(Math.Min(delaySeconds, 300)); // Cap at 5 minutes
     }
 
-    [LoggerMessage(EventId = 2001, Level = LogLevel.Debug, Message = "Started processing batch of {BatchSize} pending outbox messages")]
+    [LoggerMessage(EventId = 2001, Level = LogLevel.Debug, Message = "Started processing batch of {BatchSize} claimed outbox messages")]
     private static partial void LogBatchProcessingStarted(ILogger logger, int batchSize);
 
-    [LoggerMessage(EventId = 2002, Level = LogLevel.Warning, Message = "Skipped outbox message {MessageId}: {Reason}")]
-    private static partial void LogMessageSkipped(ILogger logger, Guid messageId, string reason);
+    [LoggerMessage(EventId = 2002, Level = LogLevel.Warning, Message = "Lost lease for outbox message {MessageId}: {Reason}")]
+    private static partial void LogLeaseLost(ILogger logger, Guid messageId, string reason);
 
     [LoggerMessage(EventId = 2003, Level = LogLevel.Information, Message = "Successfully published outbox message {MessageId} for EventType '{EventType}' and Tenant '{TenantId}'")]
     private static partial void LogMessagePublished(ILogger logger, Guid messageId, string eventType, string tenantId);

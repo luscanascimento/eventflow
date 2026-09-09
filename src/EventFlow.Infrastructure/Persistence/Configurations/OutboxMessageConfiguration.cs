@@ -50,6 +50,13 @@ public sealed class OutboxMessageConfiguration : IEntityTypeConfiguration<Outbox
             .HasMaxLength(32)
             .IsRequired();
 
+        builder.Property(o => o.LockToken)
+            .HasColumnName("lock_token")
+            .HasMaxLength(64);
+
+        builder.Property(o => o.LockedUntilUtc)
+            .HasColumnName("locked_until_utc");
+
         builder.Property(o => o.CreatedAt)
             .HasColumnName("created_at")
             .IsRequired();
@@ -69,9 +76,9 @@ public sealed class OutboxMessageConfiguration : IEntityTypeConfiguration<Outbox
             .HasColumnName("last_error")
             .HasColumnType("text");
 
-        // Index optimizing outbox processor polling queries
-        builder.HasIndex(o => new { o.Status, o.NextRetryAt, o.CreatedAt })
-            .HasDatabaseName("ix_outbox_messages_status_next_retry_at_created_at");
+        // Index optimizing outbox processor leasing and batch polling queries
+        builder.HasIndex(o => new { o.Status, o.LockedUntilUtc, o.NextRetryAt, o.CreatedAt })
+            .HasDatabaseName("ix_outbox_messages_status_locked_retry_created");
 
         builder.HasIndex(o => o.EventId)
             .HasDatabaseName("ix_outbox_messages_event_id");

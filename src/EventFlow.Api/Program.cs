@@ -21,7 +21,21 @@ builder.Services.AddProblemDetails();
 builder.Services.AddExceptionHandler<GlobalExceptionHandler>();
 builder.Services.AddOpenApi();
 
-// 3. Security: Defensive Rate Limiting (Partitioned by Tenant ID / Client IP)
+// 3. Security: Options Validation with Fail-Fast Startup in Production
+builder.Services.AddOptions<SecurityOptions>()
+    .Bind(builder.Configuration.GetSection(SecurityOptions.SectionName))
+    .Validate(options =>
+    {
+        if (builder.Environment.IsDevelopment() || builder.Environment.IsEnvironment("Testing"))
+        {
+            return true;
+        }
+
+        return !string.IsNullOrWhiteSpace(options.ApiKey) && options.ApiKey.Length >= 16;
+    }, "Security:ApiKey must be configured and at least 16 characters long in Production environments.")
+    .ValidateOnStart();
+
+// 4. Security: Defensive Rate Limiting (Partitioned by Client IP and Tenant ID)
 builder.Services.AddRateLimiter(options =>
 {
     options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
@@ -40,9 +54,11 @@ builder.Services.AddRateLimiter(options =>
 
     options.AddPolicy("events-rate-limit", httpContext =>
     {
-        string partitionKey = httpContext.Request.Headers["X-Tenant-Id"].FirstOrDefault()
-            ?? httpContext.Connection.RemoteIpAddress?.ToString()
-            ?? "anonymous";
+        string ip = httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown_ip";
+        string? tenantHeader = httpContext.Request.Headers["X-Tenant-Id"].FirstOrDefault();
+        string partitionKey = string.IsNullOrWhiteSpace(tenantHeader)
+            ? ip
+            : $"{ip}:{tenantHeader.Trim()}";
 
         return RateLimitPartition.GetSlidingWindowLimiter(
             partitionKey,
@@ -57,17 +73,17 @@ builder.Services.AddRateLimiter(options =>
     });
 });
 
-// 4. Security: Constant-Time API Key Validator
+// 5. Security: Constant-Time API Key Validator
 builder.Services.AddSingleton<IApiKeyValidator, ApiKeyValidator>();
 
-// 5. Add Application, Infrastructure, and Telemetry layers
+// 6. Add Application, Infrastructure, and Telemetry layers
 builder.Services.AddApplication();
 builder.Services.AddInfrastructure(builder.Configuration);
 builder.Services.AddEventFlowTelemetry(builder.Configuration, "EventFlow.Api");
 
 var app = builder.Build();
 
-// 6. Security Headers & Exception Handling Pipeline
+// 7. Security Headers & Exception Handling Pipeline
 app.UseExceptionHandler();
 app.UseMiddleware<SecurityHeadersMiddleware>();
 
@@ -79,7 +95,7 @@ if (app.Environment.IsDevelopment())
 app.UseHttpsRedirection();
 app.UseRateLimiter();
 
-// 7. Map Endpoints
+// 8. Map Endpoints
 app.MapHealthEndpoints();
 app.MapEventEndpoints();
 app.MapDeadLetterEndpoints();

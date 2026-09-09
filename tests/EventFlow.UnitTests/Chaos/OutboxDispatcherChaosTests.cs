@@ -67,8 +67,12 @@ public sealed class OutboxDispatcherChaosTests
         // ARRANGE: A batch of 10 messages
         var messages = Enumerable.Range(1, 10).Select(i => CreateMessage($"msg-{i}")).ToList();
 
-        _outboxStore.FetchPendingBatchAsync(_options.BatchSize, _dateTimeProvider.UtcNow, Arg.Any<CancellationToken>())
+        _outboxStore.ClaimPendingBatchAsync(_options.BatchSize, Arg.Any<string>(), Arg.Any<TimeSpan>(), _dateTimeProvider.UtcNow, Arg.Any<CancellationToken>())
             .Returns(messages);
+        _outboxStore.MarkPublishedAsync(Arg.Any<Guid>(), Arg.Any<string>(), Arg.Any<DateTimeOffset>(), Arg.Any<CancellationToken>())
+            .Returns(Result.Success());
+        _outboxStore.MarkFailedAsync(Arg.Any<Guid>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<int>(), Arg.Any<TimeSpan>(), Arg.Any<DateTimeOffset>(), Arg.Any<CancellationToken>())
+            .Returns(Result.Success());
 
         // First 6 succeed, last 4 fail with connection reset
         for (int i = 0; i < 6; i++)
@@ -89,24 +93,24 @@ public sealed class OutboxDispatcherChaosTests
         // ASSERT: All 10 were processed
         processed.Should().Be(10);
 
-        // Verify the 6 successful messages transitioned to Published
+        // Verify the 6 successful messages called MarkPublishedAsync
         for (int i = 0; i < 6; i++)
         {
-            messages[i].Status.Should().Be(OutboxStatus.Published);
-            messages[i].ProcessedAt.Should().Be(_dateTimeProvider.UtcNow);
-            messages[i].RetryCount.Should().Be(0);
+            await _outboxStore.Received(1).MarkPublishedAsync(messages[i].Id, Arg.Any<string>(), _dateTimeProvider.UtcNow, Arg.Any<CancellationToken>());
         }
 
-        // Verify the 4 failed messages were scheduled for exponential retry
+        // Verify the 4 failed messages called MarkFailedAsync
         for (int i = 6; i < 10; i++)
         {
-            messages[i].Status.Should().Be(OutboxStatus.Pending);
-            messages[i].RetryCount.Should().Be(1);
-            messages[i].LastError.Should().Be("Connection reset by peer");
-            messages[i].NextRetryAt.Should().Be(_dateTimeProvider.UtcNow.AddSeconds(2));
+            await _outboxStore.Received(1).MarkFailedAsync(
+                messages[i].Id,
+                Arg.Any<string>(),
+                "Connection reset by peer",
+                _options.MaxRetries,
+                TimeSpan.FromSeconds(2),
+                _dateTimeProvider.UtcNow,
+                Arg.Any<CancellationToken>());
         }
-
-        await _outboxStore.Received(1).SaveChangesAsync(Arg.Any<CancellationToken>());
     }
 
     [Fact]
@@ -115,8 +119,10 @@ public sealed class OutboxDispatcherChaosTests
         // ARRANGE: Publisher throws unhandled exception (e.g. broker crash)
         var message = CreateMessage("unhandled-crash-msg");
 
-        _outboxStore.FetchPendingBatchAsync(_options.BatchSize, _dateTimeProvider.UtcNow, Arg.Any<CancellationToken>())
+        _outboxStore.ClaimPendingBatchAsync(_options.BatchSize, Arg.Any<string>(), Arg.Any<TimeSpan>(), _dateTimeProvider.UtcNow, Arg.Any<CancellationToken>())
             .Returns(new[] { message });
+        _outboxStore.MarkFailedAsync(Arg.Any<Guid>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<int>(), Arg.Any<TimeSpan>(), Arg.Any<DateTimeOffset>(), Arg.Any<CancellationToken>())
+            .Returns(Result.Success());
 
         _publisher.PublishAsync(message, Arg.Any<CancellationToken>())
             .ThrowsAsync(new System.IO.IOException("Broker connection severed unexpectedly"));
@@ -126,12 +132,14 @@ public sealed class OutboxDispatcherChaosTests
 
         // ASSERT
         processed.Should().Be(1);
-        message.Status.Should().Be(OutboxStatus.Pending);
-        message.RetryCount.Should().Be(1);
-        message.LastError.Should().Contain("Broker connection severed unexpectedly");
-        message.NextRetryAt.Should().Be(_dateTimeProvider.UtcNow.AddSeconds(2));
-
-        await _outboxStore.Received(1).SaveChangesAsync(Arg.Any<CancellationToken>());
+        await _outboxStore.Received(1).MarkFailedAsync(
+            message.Id,
+            Arg.Any<string>(),
+            "Broker connection severed unexpectedly",
+            _options.MaxRetries,
+            TimeSpan.FromSeconds(2),
+            _dateTimeProvider.UtcNow,
+            Arg.Any<CancellationToken>());
     }
 
     [Fact]
@@ -140,34 +148,35 @@ public sealed class OutboxDispatcherChaosTests
         // ARRANGE: Simulate persistent 3-step outage
         var message = CreateMessage("persistent-failure-msg");
 
-        _outboxStore.FetchPendingBatchAsync(_options.BatchSize, Arg.Any<DateTimeOffset>(), Arg.Any<CancellationToken>())
+        _outboxStore.ClaimPendingBatchAsync(_options.BatchSize, Arg.Any<string>(), Arg.Any<TimeSpan>(), Arg.Any<DateTimeOffset>(), Arg.Any<CancellationToken>())
             .Returns(new[] { message });
+        _outboxStore.MarkFailedAsync(Arg.Any<Guid>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<int>(), Arg.Any<TimeSpan>(), Arg.Any<DateTimeOffset>(), Arg.Any<CancellationToken>())
+            .Returns(Result.Success());
 
         _publisher.PublishAsync(message, Arg.Any<CancellationToken>())
             .Returns(Result.Failure(DomainError.Failure("RabbitMQ.Unavailable", "Broker unreachable")));
 
         // Step 1: Initial Attempt
-        await _sut.ProcessPendingMessagesAsync();
-        message.Status.Should().Be(OutboxStatus.Pending);
-        message.RetryCount.Should().Be(1);
-        message.NextRetryAt.Should().Be(_dateTimeProvider.UtcNow.AddSeconds(2)); // 2^0 * 2 = 2s
+        int processed1 = await _sut.ProcessPendingMessagesAsync();
+        processed1.Should().Be(1);
 
         // Step 2: Second Attempt
         _dateTimeProvider.UtcNow.Returns(_dateTimeProvider.UtcNow.AddSeconds(2));
-        await _sut.ProcessPendingMessagesAsync();
-        message.Status.Should().Be(OutboxStatus.Pending);
-        message.RetryCount.Should().Be(2);
-        message.NextRetryAt.Should().Be(_dateTimeProvider.UtcNow.AddSeconds(4)); // 2^1 * 2 = 4s
+        int processed2 = await _sut.ProcessPendingMessagesAsync();
+        processed2.Should().Be(1);
 
-        // Step 3: Third Attempt (Reaching MaxRetries = 3)
+        // Step 3: Third Attempt
         _dateTimeProvider.UtcNow.Returns(_dateTimeProvider.UtcNow.AddSeconds(4));
-        await _sut.ProcessPendingMessagesAsync();
+        int processed3 = await _sut.ProcessPendingMessagesAsync();
+        processed3.Should().Be(1);
 
-        // ASSERT: Final State is DeadLettered
-        message.Status.Should().Be(OutboxStatus.DeadLettered);
-        message.RetryCount.Should().Be(3);
-        message.NextRetryAt.Should().BeNull();
-        message.ProcessedAt.Should().Be(_dateTimeProvider.UtcNow);
-        message.LastError.Should().Be("Broker unreachable");
+        await _outboxStore.Received(3).MarkFailedAsync(
+            message.Id,
+            Arg.Any<string>(),
+            "Broker unreachable",
+            _options.MaxRetries,
+            Arg.Any<TimeSpan>(),
+            Arg.Any<DateTimeOffset>(),
+            Arg.Any<CancellationToken>());
     }
 }

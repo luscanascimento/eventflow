@@ -25,7 +25,8 @@ public class RabbitMqEventPublisherTests
 
     public RabbitMqEventPublisherTests()
     {
-        _connection.CreateChannelAsync(Arg.Any<CancellationToken>()).Returns(Task.FromResult(_channel));
+        _connection.CreateChannelAsync(Arg.Any<CreateChannelOptions>(), Arg.Any<CancellationToken>())
+            .Returns(Task.FromResult(_channel));
         _sut = new RabbitMqEventPublisher(_connection, Options.Create(_options), _logger);
     }
 
@@ -75,7 +76,7 @@ public class RabbitMqEventPublisherTests
     public async Task PublishAsync_WhenConnectionFails_ShouldReturnFailureResult()
     {
         var message = CreateSampleMessage();
-        _connection.CreateChannelAsync(Arg.Any<CancellationToken>())
+        _connection.CreateChannelAsync(Arg.Any<CreateChannelOptions>(), Arg.Any<CancellationToken>())
             .ThrowsAsync(new InvalidOperationException("Broker connection refused"));
 
         var result = await _sut.PublishAsync(message, CancellationToken.None);

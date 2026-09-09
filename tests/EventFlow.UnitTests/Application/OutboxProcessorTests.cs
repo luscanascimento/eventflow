@@ -57,78 +57,78 @@ public class OutboxProcessorTests
     [Fact]
     public async Task ProcessPendingMessagesAsync_WhenNoMessages_ShouldReturnZeroAndNotPublish()
     {
-        _outboxStore.FetchPendingBatchAsync(_options.BatchSize, _dateTimeProvider.UtcNow, Arg.Any<CancellationToken>())
+        _outboxStore.ClaimPendingBatchAsync(_options.BatchSize, Arg.Any<string>(), Arg.Any<TimeSpan>(), _dateTimeProvider.UtcNow, Arg.Any<CancellationToken>())
             .Returns(Array.Empty<OutboxMessage>());
 
         int processed = await _sut.ProcessPendingMessagesAsync();
 
         processed.Should().Be(0);
         await _publisher.DidNotReceive().PublishAsync(Arg.Any<OutboxMessage>(), Arg.Any<CancellationToken>());
-        await _outboxStore.DidNotReceive().SaveChangesAsync(Arg.Any<CancellationToken>());
     }
 
     [Fact]
     public async Task ProcessPendingMessagesAsync_WhenPublishSucceeds_ShouldMarkPublishedAndSave()
     {
         var message = CreateSampleOutboxMessage();
-        _outboxStore.FetchPendingBatchAsync(_options.BatchSize, _dateTimeProvider.UtcNow, Arg.Any<CancellationToken>())
+        _outboxStore.ClaimPendingBatchAsync(_options.BatchSize, Arg.Any<string>(), Arg.Any<TimeSpan>(), _dateTimeProvider.UtcNow, Arg.Any<CancellationToken>())
             .Returns(new[] { message });
         _publisher.PublishAsync(message, Arg.Any<CancellationToken>())
+            .Returns(Result.Success());
+        _outboxStore.MarkPublishedAsync(message.Id, Arg.Any<string>(), _dateTimeProvider.UtcNow, Arg.Any<CancellationToken>())
             .Returns(Result.Success());
 
         int processed = await _sut.ProcessPendingMessagesAsync();
 
         processed.Should().Be(1);
-        message.Status.Should().Be(OutboxStatus.Published);
-        message.ProcessedAt.Should().Be(_dateTimeProvider.UtcNow);
-        message.LastError.Should().BeNull();
-
         await _publisher.Received(1).PublishAsync(message, Arg.Any<CancellationToken>());
-        await _outboxStore.Received(1).SaveChangesAsync(Arg.Any<CancellationToken>());
+        await _outboxStore.Received(1).MarkPublishedAsync(message.Id, Arg.Any<string>(), _dateTimeProvider.UtcNow, Arg.Any<CancellationToken>());
     }
 
     [Fact]
     public async Task ProcessPendingMessagesAsync_WhenPublishFails_ShouldScheduleRetryWithBackoff()
     {
         var message = CreateSampleOutboxMessage();
-        _outboxStore.FetchPendingBatchAsync(_options.BatchSize, _dateTimeProvider.UtcNow, Arg.Any<CancellationToken>())
+        _outboxStore.ClaimPendingBatchAsync(_options.BatchSize, Arg.Any<string>(), Arg.Any<TimeSpan>(), _dateTimeProvider.UtcNow, Arg.Any<CancellationToken>())
             .Returns(new[] { message });
         _publisher.PublishAsync(message, Arg.Any<CancellationToken>())
             .Returns(Result.Failure(DomainError.Failure("Broker.ConnectionFailed", "RabbitMQ unreachable")));
+        _outboxStore.MarkFailedAsync(message.Id, Arg.Any<string>(), "RabbitMQ unreachable", _options.MaxRetries, Arg.Any<TimeSpan>(), _dateTimeProvider.UtcNow, Arg.Any<CancellationToken>())
+            .Returns(Result.Success());
 
         int processed = await _sut.ProcessPendingMessagesAsync();
 
         processed.Should().Be(1);
-        message.Status.Should().Be(OutboxStatus.Pending);
-        message.RetryCount.Should().Be(1);
-        message.LastError.Should().Be("RabbitMQ unreachable");
-        message.NextRetryAt.Should().Be(_dateTimeProvider.UtcNow.AddSeconds(2)); // 2^0 * 2s = 2s
-
-        await _outboxStore.Received(1).SaveChangesAsync(Arg.Any<CancellationToken>());
+        await _outboxStore.Received(1).MarkFailedAsync(
+            message.Id,
+            Arg.Any<string>(),
+            "RabbitMQ unreachable",
+            _options.MaxRetries,
+            TimeSpan.FromSeconds(2), // 2^0 * 2s = 2s
+            _dateTimeProvider.UtcNow,
+            Arg.Any<CancellationToken>());
     }
 
     [Fact]
     public async Task ProcessPendingMessagesAsync_WhenPublishReachesMaxRetries_ShouldTransitionToDeadLettered()
     {
         var message = CreateSampleOutboxMessage();
-        // Simulate already having 2 retries under max 3 retries
-        message.MarkFailed("Error 1", maxRetries: 3, TimeSpan.FromSeconds(1), _dateTimeProvider.UtcNow);
-        message.MarkFailed("Error 2", maxRetries: 3, TimeSpan.FromSeconds(2), _dateTimeProvider.UtcNow);
-
-        _outboxStore.FetchPendingBatchAsync(_options.BatchSize, _dateTimeProvider.UtcNow, Arg.Any<CancellationToken>())
+        _outboxStore.ClaimPendingBatchAsync(_options.BatchSize, Arg.Any<string>(), Arg.Any<TimeSpan>(), _dateTimeProvider.UtcNow, Arg.Any<CancellationToken>())
             .Returns(new[] { message });
         _publisher.PublishAsync(message, Arg.Any<CancellationToken>())
             .Returns(Result.Failure(DomainError.Failure("Broker.FatalError", "Poison message format")));
+        _outboxStore.MarkFailedAsync(message.Id, Arg.Any<string>(), "Poison message format", _options.MaxRetries, Arg.Any<TimeSpan>(), _dateTimeProvider.UtcNow, Arg.Any<CancellationToken>())
+            .Returns(Result.Success());
 
         int processed = await _sut.ProcessPendingMessagesAsync();
 
         processed.Should().Be(1);
-        message.Status.Should().Be(OutboxStatus.DeadLettered);
-        message.RetryCount.Should().Be(3);
-        message.NextRetryAt.Should().BeNull();
-        message.ProcessedAt.Should().Be(_dateTimeProvider.UtcNow);
-        message.LastError.Should().Be("Poison message format");
-
-        await _outboxStore.Received(1).SaveChangesAsync(Arg.Any<CancellationToken>());
+        await _outboxStore.Received(1).MarkFailedAsync(
+            message.Id,
+            Arg.Any<string>(),
+            "Poison message format",
+            _options.MaxRetries,
+            Arg.Any<TimeSpan>(),
+            _dateTimeProvider.UtcNow,
+            Arg.Any<CancellationToken>());
     }
 }

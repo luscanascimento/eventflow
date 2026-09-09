@@ -9,8 +9,8 @@ using RabbitMQ.Client;
 namespace EventFlow.Infrastructure.Messaging;
 
 /// <summary>
-/// High-performance RabbitMQ publisher implementing <see cref="IEventPublisher"/>.
-/// Publishes outbox events to the topic exchange with persistent delivery mode and W3C TraceContext headers.
+/// Resilient RabbitMQ publisher implementing <see cref="IEventPublisher"/>.
+/// Enforces mandatory routing and publisher confirmation before confirming successful dispatch.
 /// </summary>
 public sealed partial class RabbitMqEventPublisher : IEventPublisher
 {
@@ -32,7 +32,21 @@ public sealed partial class RabbitMqEventPublisher : IEventPublisher
     {
         try
         {
-            await using var channel = await _connection.CreateChannelAsync(cancellationToken);
+            var channelOptions = new CreateChannelOptions(
+                publisherConfirmationsEnabled: true,
+                publisherConfirmationTrackingEnabled: true);
+
+            await using var channel = await _connection.CreateChannelAsync(channelOptions, cancellationToken);
+
+            bool returnedUnroutable = false;
+            string? returnReason = null;
+
+            channel.BasicReturnAsync += (sender, ea) =>
+            {
+                returnedUnroutable = true;
+                returnReason = $"Message returned by broker as unroutable (ReplyCode: {ea.ReplyCode}, ReplyText: '{ea.ReplyText}')";
+                return Task.CompletedTask;
+            };
 
             var properties = new BasicProperties
             {
@@ -55,6 +69,7 @@ public sealed partial class RabbitMqEventPublisher : IEventPublisher
 
             byte[] body = Encoding.UTF8.GetBytes(message.Payload);
 
+            // BasicPublishAsync with publisher confirmations tracking awaits confirmation from broker
             await channel.BasicPublishAsync(
                 exchange: _options.ExchangeName,
                 routingKey: message.RoutingKey,
@@ -62,6 +77,12 @@ public sealed partial class RabbitMqEventPublisher : IEventPublisher
                 basicProperties: properties,
                 body: body,
                 cancellationToken: cancellationToken);
+
+            if (returnedUnroutable)
+            {
+                LogPublishUnroutable(_logger, message.Id, message.EventId, returnReason ?? "Unroutable");
+                return Result.Failure(DomainError.Failure("RabbitMQ.UnroutableMessage", returnReason ?? "Message was returned by broker as unroutable."));
+            }
 
             LogPublishedToBroker(_logger, message.Id, message.EventId, _options.ExchangeName, message.RoutingKey);
             return Result.Success();
@@ -78,4 +99,7 @@ public sealed partial class RabbitMqEventPublisher : IEventPublisher
 
     [LoggerMessage(EventId = 6002, Level = LogLevel.Error, Message = "Failed to publish outbox message {OutboxId} (Event {EventId}) to RabbitMQ: {Error}")]
     private static partial void LogPublishFailed(ILogger logger, Guid outboxId, Guid eventId, string error);
+
+    [LoggerMessage(EventId = 6003, Level = LogLevel.Warning, Message = "Message {OutboxId} (Event {EventId}) was returned by broker as unroutable: {Reason}")]
+    private static partial void LogPublishUnroutable(ILogger logger, Guid outboxId, Guid eventId, string reason);
 }

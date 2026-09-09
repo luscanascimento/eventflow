@@ -1,6 +1,7 @@
 using EventFlow.Api.Security;
 using EventFlow.Application.Events.Commands;
 using EventFlow.Domain.Common;
+using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 
 namespace EventFlow.Api.Endpoints;
@@ -16,9 +17,22 @@ public static class EventEndpoints
         group.MapPost("/", async (
             [FromBody] IngestEventCommand command,
             [FromServices] IngestEventUseCase useCase,
+            HttpContext httpContext,
             CancellationToken cancellationToken) =>
         {
-            var result = await useCase.ExecuteAsync(command, cancellationToken);
+            // Validate X-Tenant-Id header against payload tenant if header is present
+            string? headerTenant = httpContext.Request.Headers["X-Tenant-Id"].FirstOrDefault();
+            if (!string.IsNullOrWhiteSpace(headerTenant) &&
+                !string.Equals(headerTenant.Trim(), command?.TenantId?.Trim(), StringComparison.Ordinal))
+            {
+                return Results.Problem(
+                    statusCode: StatusCodes.Status400BadRequest,
+                    title: "Tenant Mismatch",
+                    detail: "The 'X-Tenant-Id' header value does not match the payload 'tenantId'.",
+                    instance: httpContext.Request.Path);
+            }
+
+            var result = await useCase.ExecuteAsync(command!, cancellationToken);
 
             if (result.IsSuccess)
             {

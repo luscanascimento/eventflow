@@ -1,25 +1,27 @@
 using System.Net;
 using System.Net.Sockets;
+using System.Security;
 
 namespace EventFlow.Infrastructure.Security;
 
 /// <summary>
-/// Defensive utility protecting outgoing HTTP requests and webhooks against Server-Side Request Forgery (SSRF).
+/// Defensive utility protecting outgoing HTTP requests and webhooks against Server-Side Request Forgery (SSRF)
+/// and DNS rebinding attacks.
 /// </summary>
 public static class SsrfGuard
 {
     /// <summary>
-    /// Validates that a URI is safe for outbound dispatch, checking schemes and blocking private, loopback,
-    /// or cloud metadata IP addresses when <paramref name="allowPrivateAddresses"/> is false.
+    /// Validates that a URI is safe for outbound dispatch, checking schemes, blocking private/reserved IP ranges,
+    /// and verifying against configurable allowlists.
     /// </summary>
-    public static bool IsSafeTarget(Uri targetUri, bool allowPrivateAddresses = false)
+    public static bool IsSafeTarget(Uri targetUri, SsrfOptions? options = null)
     {
         if (targetUri == null || !targetUri.IsAbsoluteUri)
         {
             return false;
         }
 
-        // 1. Only HTTP and HTTPS schemes are allowed
+        // 1. Only HTTP and HTTPS schemes are permitted
         if (targetUri.Scheme != Uri.UriSchemeHttp && targetUri.Scheme != Uri.UriSchemeHttps)
         {
             return false;
@@ -30,15 +32,13 @@ public static class SsrfGuard
             return false;
         }
 
-        if (allowPrivateAddresses)
+        // 2. Explicit localhost checks
+        if (string.Equals(targetUri.Host, "localhost", StringComparison.OrdinalIgnoreCase) ||
+            targetUri.Host.EndsWith(".localhost", StringComparison.OrdinalIgnoreCase) ||
+            targetUri.Host.EndsWith(".local", StringComparison.OrdinalIgnoreCase) ||
+            targetUri.Host.EndsWith(".internal", StringComparison.OrdinalIgnoreCase))
         {
-            return true;
-        }
-
-        // 2. Check for explicit localhost names
-        if (string.Equals(targetUri.Host, "localhost", StringComparison.OrdinalIgnoreCase))
-        {
-            return false;
+            return options?.AllowedHosts.Contains(targetUri.Host) == true || (options?.AllowPrivateNetworks == true);
         }
 
         // 3. Resolve host IPs and verify against private / dangerous ranges
@@ -46,7 +46,7 @@ public static class SsrfGuard
         {
             if (IPAddress.TryParse(targetUri.Host, out var directIp))
             {
-                return !IsPrivateOrReserved(directIp);
+                return IsIpAllowed(directIp, targetUri.Host, options);
             }
 
             var addresses = Dns.GetHostAddresses(targetUri.Host);
@@ -57,7 +57,7 @@ public static class SsrfGuard
 
             foreach (var ip in addresses)
             {
-                if (IsPrivateOrReserved(ip))
+                if (!IsIpAllowed(ip, targetUri.Host, options))
                 {
                     return false;
                 }
@@ -67,9 +67,28 @@ public static class SsrfGuard
         }
         catch
         {
-            // DNS resolution failure or network error fails safely (closed)
+            // DNS resolution failure fails closed
             return false;
         }
+    }
+
+    /// <summary>
+    /// Checks whether an IP address is permitted based on SSRF defense rules and optional allowlists.
+    /// </summary>
+    public static bool IsIpAllowed(IPAddress ip, string host, SsrfOptions? options = null)
+    {
+        if (options?.AllowedHosts.Contains(host) == true ||
+            options?.AllowedHosts.Contains(ip.ToString()) == true)
+        {
+            return true;
+        }
+
+        if (options?.AllowPrivateNetworks == true)
+        {
+            return true;
+        }
+
+        return !IsPrivateOrReserved(ip);
     }
 
     /// <summary>
@@ -84,12 +103,31 @@ public static class SsrfGuard
 
         if (ip.AddressFamily == AddressFamily.InterNetworkV6)
         {
-            return ip.IsIPv6LinkLocal || ip.IsIPv6SiteLocal || ip.IsIPv6Multicast;
+            // IPv6 link-local (fe80::/10), site-local, multicast, unique local (fc00::/7)
+            if (ip.IsIPv6LinkLocal || ip.IsIPv6SiteLocal || ip.IsIPv6Multicast)
+            {
+                return true;
+            }
+
+            byte[] v6Bytes = ip.GetAddressBytes();
+            // Unique local address fc00::/7 (first byte 0xfc or 0xfd)
+            if ((v6Bytes[0] & 0xfe) == 0xfc)
+            {
+                return true;
+            }
+
+            // IPv4-mapped IPv6 address (::ffff:x.x.x.x)
+            if (ip.IsIPv4MappedToIPv6)
+            {
+                return IsPrivateOrReserved(ip.MapToIPv4());
+            }
+
+            return false;
         }
 
         byte[] bytes = ip.GetAddressBytes();
 
-        // 0.0.0.0/8 (Broadcast/Current network)
+        // 0.0.0.0/8 (Current network)
         if (bytes[0] == 0)
         {
             return true;
@@ -107,13 +145,13 @@ public static class SsrfGuard
             return true;
         }
 
-        // 169.254.0.0/16 (Link-Local & Cloud Metadata e.g. AWS/Azure 169.254.169.254)
+        // 169.254.0.0/16 (Link-Local & Cloud Metadata e.g. AWS/GCP/Azure 169.254.169.254)
         if (bytes[0] == 169 && bytes[1] == 254)
         {
             return true;
         }
 
-        // 172.16.0.0/12 (RFC 1918 Private)
+        // 172.16.0.0/12 (RFC 1918 Private: 172.16.0.0 - 172.31.255.255)
         if (bytes[0] == 172 && bytes[1] >= 16 && bytes[1] <= 31)
         {
             return true;
@@ -125,12 +163,78 @@ public static class SsrfGuard
             return true;
         }
 
-        // 224.0.0.0/4 (Multicast)
+        // 224.0.0.0/4 (Multicast) & 240.0.0.0/4 (Reserved)
         if (bytes[0] >= 224)
         {
             return true;
         }
 
         return false;
+    }
+
+    /// <summary>
+    /// Creates a hardened SocketsHttpHandler configured to validate resolved socket IP addresses
+    /// at connect time to prevent DNS rebinding attacks.
+    /// </summary>
+    public static SocketsHttpHandler CreateSafeSocketsHttpHandler(SsrfOptions? options = null)
+    {
+        return new SocketsHttpHandler
+        {
+            ConnectCallback = async (context, cancellationToken) =>
+            {
+                var host = context.DnsEndPoint.Host;
+                var port = context.DnsEndPoint.Port;
+
+                var entry = await Dns.GetHostEntryAsync(host, cancellationToken);
+                var validIp = entry.AddressList.FirstOrDefault(ip => IsIpAllowed(ip, host, options));
+
+                if (validIp == null)
+                {
+                    throw new SecurityException($"Connection to destination '{SanitizeUrlForLogging(new Uri($"http://{host}"))}' was blocked by SSRF defense policies.");
+                }
+
+                var socket = new Socket(validIp.AddressFamily, SocketType.Stream, ProtocolType.Tcp)
+                {
+                    NoDelay = true
+                };
+
+                try
+                {
+                    await socket.ConnectAsync(new IPEndPoint(validIp, port), cancellationToken);
+                    return new NetworkStream(socket, ownsSocket: true);
+                }
+                catch
+                {
+                    socket.Dispose();
+                    throw;
+                }
+            }
+        };
+    }
+
+    /// <summary>
+    /// Sanitizes a URL for structured logging by stripping query strings and user credentials.
+    /// </summary>
+    public static string SanitizeUrlForLogging(Uri uri)
+    {
+        if (uri == null)
+        {
+            return string.Empty;
+        }
+
+        try
+        {
+            var builder = new UriBuilder(uri)
+            {
+                Query = string.Empty,
+                UserName = string.Empty,
+                Password = string.Empty
+            };
+            return builder.Uri.ToString();
+        }
+        catch
+        {
+            return $"{uri.Scheme}://{uri.Host}:{uri.Port}{uri.AbsolutePath}";
+        }
     }
 }

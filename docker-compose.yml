@@ -5,7 +5,7 @@ services:
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-eventflow}
       POSTGRES_USER: ${POSTGRES_USER:-eventflow_user}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-eventflow_secret_password}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Variable POSTGRES_PASSWORD must be set in .env file}
     ports:
       - "${POSTGRES_PORT:-5432}:5432"
     volumes:
@@ -22,7 +22,7 @@ services:
     container_name: eventflow-rabbitmq
     environment:
       RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-eventflow_admin}
-      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-eventflow_admin_secret}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:?Variable RABBITMQ_PASSWORD must be set in .env file}
     ports:
       - "${RABBITMQ_PORT:-5672}:5672"
       - "${RABBITMQ_MANAGEMENT_PORT:-15672}:15672"
@@ -61,6 +61,19 @@ services:
       - "4318:4318"   # OTLP HTTP receiver
     restart: unless-stopped
 
+  migrator:
+    build:
+      context: .
+      dockerfile: Dockerfile.migrator
+    container_name: eventflow-migrator
+    environment:
+      DOTNET_ENVIRONMENT: Production
+      ConnectionStrings__DefaultConnection: Host=postgres;Port=5432;Database=${POSTGRES_DB:-eventflow};Username=${POSTGRES_USER:-eventflow_user};Password=${POSTGRES_PASSWORD:?Variable POSTGRES_PASSWORD must be set in .env file};
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: on-failure
+
   api:
     build:
       context: .
@@ -68,14 +81,14 @@ services:
     container_name: eventflow-api
     environment:
       ASPNETCORE_ENVIRONMENT: Production
-      ConnectionStrings__DefaultConnection: Host=postgres;Port=5432;Database=${POSTGRES_DB:-eventflow};Username=${POSTGRES_USER:-eventflow_user};Password=${POSTGRES_PASSWORD:-eventflow_secret_password};
+      ConnectionStrings__DefaultConnection: Host=postgres;Port=5432;Database=${POSTGRES_DB:-eventflow};Username=${POSTGRES_USER:-eventflow_user};Password=${POSTGRES_PASSWORD:?Variable POSTGRES_PASSWORD must be set in .env file};
       RabbitMQ__HostName: rabbitmq
       RabbitMQ__Port: 5672
       RabbitMQ__UserName: ${RABBITMQ_USER:-eventflow_admin}
-      RabbitMQ__Password: ${RABBITMQ_PASSWORD:-eventflow_admin_secret}
+      RabbitMQ__Password: ${RABBITMQ_PASSWORD:?Variable RABBITMQ_PASSWORD must be set in .env file}
       Redis__ConnectionString: redis:6379
       Redis__Enabled: "true"
-      Security__ApiKey: ${API_KEY:-ef_live_secret_key_1234567890abcdef}
+      Security__ApiKey: ${API_KEY:?Variable API_KEY must be set in .env file}
       OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
       OTEL_SERVICE_NAME: EventFlow.Api
     ports:
@@ -83,6 +96,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      migrator:
+        condition: service_completed_successfully
       rabbitmq:
         condition: service_healthy
       redis:
@@ -98,11 +113,11 @@ services:
     container_name: eventflow-worker
     environment:
       DOTNET_ENVIRONMENT: Production
-      ConnectionStrings__DefaultConnection: Host=postgres;Port=5432;Database=${POSTGRES_DB:-eventflow};Username=${POSTGRES_USER:-eventflow_user};Password=${POSTGRES_PASSWORD:-eventflow_secret_password};
+      ConnectionStrings__DefaultConnection: Host=postgres;Port=5432;Database=${POSTGRES_DB:-eventflow};Username=${POSTGRES_USER:-eventflow_user};Password=${POSTGRES_PASSWORD:?Variable POSTGRES_PASSWORD must be set in .env file};
       RabbitMQ__HostName: rabbitmq
       RabbitMQ__Port: 5672
       RabbitMQ__UserName: ${RABBITMQ_USER:-eventflow_admin}
-      RabbitMQ__Password: ${RABBITMQ_PASSWORD:-eventflow_admin_secret}
+      RabbitMQ__Password: ${RABBITMQ_PASSWORD:?Variable RABBITMQ_PASSWORD must be set in .env file}
       Redis__ConnectionString: redis:6379
       Redis__Enabled: "true"
       OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
@@ -110,6 +125,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      migrator:
+        condition: service_completed_successfully
       rabbitmq:
         condition: service_healthy
       redis:

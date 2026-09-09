@@ -1,24 +1,28 @@
-# EventFlow — Production Readiness Review (PRR) & Chaos Engineering Audit
+# EventFlow — Production Readiness Review (PRR) & Architecture Audit
 
 > **Documento:** Relatório Técnico de Prontidão para Produção, Auditoria Adversarial e Engenharia de Caos  
 > **Nível:** Staff / Principal Software Engineer  
-> **Target Runtime:** .NET 9 LTS (C# 13)  
-> **Status:** **APPROVED FOR PRODUCTION** ✅ (206 Testes Automatizados, 0 Warnings, Zero Vulnerabilidades)  
+> **Target Runtime:** .NET 9 STS (C# 13)  
+> **Status:** **PRODUCTION-HARDENED REFERENCE ARCHITECTURE** ✅ (211 Testes Automatizados [185 Unit/Chaos + 26 Integration], 0 Warnings)  
 
 ---
 
 ## 1. Sumário Executivo & Veredito de Engenharia
 
-O **EventFlow** foi submetido a uma bateria extensiva de auditoria adversarial de segurança, testes de estresse de alta concorrência e injeção de falhas (engenharia de caos). Todos os testes confirmaram a solidez das garantias arquiteturais: **zero perda de dados (*Zero Data-Loss*)**, **execução logicamente única (*Exactly-Once Processing*)**, **isolamento de falhas em cascata** e **rastreabilidade distribuída ponta a ponta**.
+O **EventFlow** foi submetido a uma auditoria arquitetural rigorosa e remediado para resolver pontos críticos de produção: isolamento do ciclo de vida de migrações, concorrência no outbox com leasing atômico (`SKIP LOCKED`), rastreamento de confirmações de publicação no broker, idempotência persistente no PostgreSQL com controle de concorrência, proteção contra SSRF e DNS rebinding, segurança de credenciais *fail-closed* e health checks com probes reais.
 
 ```text
 ┌──────────────────────────────────────────────────────────────────────────────────┐
-│                             AUDIT VERDICT: APPROVED                              │
+│                    ARCHITECTURE AUDIT: REMEDIATED & HARDENED                     │
 │                                                                                  │
-│  [x] Concurrency & Race Conditions: PASSED (50-thread atomic lock verification)  │
-│  [x] Chaos & Fault Injection:       PASSED (Redis & RabbitMQ outages tolerated)  │
-│  [x] Security & OWASP Top 10:       PASSED (SSRF, Timing attacks, DoS mitigated) │
-│  [x] Test Suite:                    206 Tests (184 Unit/Chaos + 22 Integration)  │
+│  [x] Database Migrations:           SEPARATED (Dedicated Migrator service/image) │
+│  [x] Outbox Atomic Leasing:         PASSED (Short DB txn, crash recovery lease)  │
+│  [x] Publisher Confirms & Return:   PASSED (Tracking confirmations & unroutable) │
+│  [x] Consumer Idempotency:          PASSED (Postgres atomic lease + Redis guard) │
+│  [x] SSRF & DNS Rebinding:          PASSED (SsrfGuard + SafeSocketsHttpHandler)  │
+│  [x] Fail-Closed Security:          PASSED (ValidateOnStart + constant-time hash)│
+│  [x] Probed Health Checks:          PASSED (/health/ready probes DB/MQ/Redis)    │
+│  [x] Test Suite:                    211 Tests (185 Unit/Chaos + 26 Integration)  │
 │  [x] Code Quality:                  0 Warnings (TreatWarningsAsErrors=true)       │
 └──────────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -98,9 +102,24 @@ Quando eventos acumularem na Dead Letter Queue devido a indisponibilidade prolon
 
 ---
 
-## 6. Conclusão da Arquitetura
+---
 
-O EventFlow atinge o estado da arte de engenharia de software distribuída em .NET 9:
+## 6. Pré-requisitos & Checklist para Deploy em Produção
+
+Embora a base técnica de software esteja completamente endurecida, um deploy real em ambiente produtivo corporativo requer os seguintes passos de infraestrutura e governança:
+
+1. **Gestão de Segredos:** Integrar com Azure Key Vault / AWS Secrets Manager / HashiCorp Vault em vez de variáveis de ambiente puras em disco.
+2. **Clusterização & HA de Infraestrutura:** Configurar PostgreSQL com réplicas e failover (ex: Patroni), RabbitMQ Cluster (Quorum Queues) e Redis Sentinel / Cluster.
+3. **Connection Pooling:** Avaliar uso de PgBouncer em caso de múltiplos workers com alta concorrência de conexões curtas.
+4. **Alocação de Recursos (K8s Limits):** Definir requests e limits de CPU/Memória adequados nos manifests de Kubernetes.
+5. **Observabilidade Contínua:** Configurar dashboards no Grafana e alertas no Prometheus / PagerDuty para as métricas `eventflow.*`.
+
+---
+
+## 7. Conclusão da Arquitetura
+
+O EventFlow atinge um nível exemplar de maturidade em engenharia de software distribuída em .NET 9:
 * Código 100% explícito, limpo e testável sem abstrações artificiais.
-* Concorrência protegida em todos os pontos críticos (`SKIP LOCKED`, Redis Lua Scripts, PostgreSQL Unique Constraints).
-* Segurança defensiva e observabilidade nativa integradas desde o primeiro dia de design.
+* Concorrência protegida em todos os pontos críticos (`SKIP LOCKED`, Redis Lua Scripts, PostgreSQL Unique Constraints com status `Processing`).
+* Ciclo de vida de migrações isolado e executado antes de APIs e Workers.
+* Segurança defensiva com validação fail-closed, mitigação de SSRF/DNS rebinding e observabilidade nativa integradas.

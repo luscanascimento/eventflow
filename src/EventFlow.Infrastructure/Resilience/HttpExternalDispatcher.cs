@@ -4,6 +4,7 @@ using EventFlow.Application.Abstractions;
 using EventFlow.Domain.Common;
 using EventFlow.Infrastructure.Security;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using Polly;
 using Polly.CircuitBreaker;
 using Polly.Timeout;
@@ -12,21 +13,24 @@ namespace EventFlow.Infrastructure.Resilience;
 
 /// <summary>
 /// Production HTTP external dispatcher executing outgoing webhooks inside a Polly v8 resilience pipeline
-/// with SSRF defense, W3C TraceContext propagation, and structured diagnostics.
+/// with active SSRF defense, W3C TraceContext propagation, and sanitized structured diagnostics.
 /// </summary>
 public sealed partial class HttpExternalDispatcher : IExternalDispatcher
 {
     private readonly HttpClient _httpClient;
     private readonly ResiliencePipeline<HttpResponseMessage> _pipeline;
+    private readonly SsrfOptions _ssrfOptions;
     private readonly ILogger<HttpExternalDispatcher> _logger;
 
     public HttpExternalDispatcher(
         HttpClient httpClient,
         ResiliencePipeline<HttpResponseMessage> pipeline,
+        IOptions<SsrfOptions> ssrfOptions,
         ILogger<HttpExternalDispatcher> logger)
     {
         _httpClient = httpClient;
         _pipeline = pipeline;
+        _ssrfOptions = ssrfOptions.Value;
         _logger = logger;
     }
 
@@ -36,15 +40,17 @@ public sealed partial class HttpExternalDispatcher : IExternalDispatcher
     {
         ArgumentNullException.ThrowIfNull(request);
 
-        // SSRF Defense: validate URI scheme and safety
-        if (!SsrfGuard.IsSafeTarget(request.TargetUrl, allowPrivateAddresses: true))
+        string sanitizedUrl = SsrfGuard.SanitizeUrlForLogging(request.TargetUrl);
+
+        // SSRF Defense: validate URI scheme and safety against private/cloud metadata ranges
+        if (!SsrfGuard.IsSafeTarget(request.TargetUrl, _ssrfOptions))
         {
-            LogInvalidUriScheme(_logger, request.TargetUrl.ToString());
+            LogInvalidUriScheme(_logger, sanitizedUrl);
             return Result.Failure<ExternalDispatchResponse>(
-                DomainError.Validation("ExternalDispatcher.InvalidScheme", "Target URL scheme is invalid or blocked by security policies."));
+                DomainError.Validation("ExternalDispatcher.BlockedTarget", "Target URL is blocked by security and SSRF defense policies."));
         }
 
-        LogDispatching(_logger, request.Method.Method, request.TargetUrl.ToString());
+        LogDispatching(_logger, request.Method.Method, sanitizedUrl);
 
         var stopwatch = Stopwatch.StartNew();
 
@@ -86,34 +92,34 @@ public sealed partial class HttpExternalDispatcher : IExternalDispatcher
         catch (BrokenCircuitException ex)
         {
             stopwatch.Stop();
-            LogCircuitBroken(_logger, request.TargetUrl.ToString(), ex);
+            LogCircuitBroken(_logger, sanitizedUrl, ex);
             return Result.Failure<ExternalDispatchResponse>(
                 DomainError.Failure("Resilience.CircuitBreakerOpen", "Downstream service circuit breaker is open. Request short-circuited."));
         }
         catch (TimeoutRejectedException ex)
         {
             stopwatch.Stop();
-            LogTimeout(_logger, request.TargetUrl.ToString(), stopwatch.ElapsedMilliseconds, ex);
+            LogTimeout(_logger, sanitizedUrl, stopwatch.ElapsedMilliseconds, ex);
             return Result.Failure<ExternalDispatchResponse>(
                 DomainError.Failure("Resilience.Timeout", "The external dispatch operation timed out."));
         }
         catch (HttpRequestException ex)
         {
             stopwatch.Stop();
-            LogNetworkError(_logger, request.TargetUrl.ToString(), ex);
+            LogNetworkError(_logger, sanitizedUrl, ex);
             return Result.Failure<ExternalDispatchResponse>(
                 DomainError.Failure("Resilience.NetworkError", $"Network error during dispatch: {ex.Message}"));
         }
         catch (Exception ex)
         {
             stopwatch.Stop();
-            LogUnhandledError(_logger, request.TargetUrl.ToString(), ex);
+            LogUnhandledError(_logger, sanitizedUrl, ex);
             return Result.Failure<ExternalDispatchResponse>(
                 DomainError.Failure("Resilience.UnhandledError", $"Unexpected error during dispatch: {ex.Message}"));
         }
     }
 
-    [LoggerMessage(EventId = 9201, Level = LogLevel.Warning, Message = "Rejected dispatch to target '{TargetUrl}' due to invalid scheme")]
+    [LoggerMessage(EventId = 9201, Level = LogLevel.Warning, Message = "Rejected dispatch to target '{TargetUrl}' by SSRF policy")]
     private static partial void LogInvalidUriScheme(ILogger logger, string targetUrl);
 
     [LoggerMessage(EventId = 9202, Level = LogLevel.Information, Message = "Dispatching HTTP {Method} request to '{TargetUrl}'")]

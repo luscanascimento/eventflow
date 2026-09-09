@@ -4,7 +4,7 @@ using System.Text;
 namespace EventFlow.Api.Security;
 
 /// <summary>
-/// Validates API Keys using constant-time comparisons to prevent side-channel timing attacks.
+/// Validates API Keys using constant-time comparisons over SHA-256 digests to prevent side-channel timing and length attacks.
 /// </summary>
 public interface IApiKeyValidator
 {
@@ -24,14 +24,9 @@ public sealed class ApiKeyValidator : IApiKeyValidator
             return false;
         }
 
-        byte[] providedBytes = Encoding.UTF8.GetBytes(providedKey);
-        byte[] expectedBytes = Encoding.UTF8.GetBytes(expectedKey);
+        byte[] providedHash = SHA256.HashData(Encoding.UTF8.GetBytes(providedKey));
+        byte[] expectedHash = SHA256.HashData(Encoding.UTF8.GetBytes(expectedKey));
 
-        if (providedBytes.Length != expectedBytes.Length)
-        {
-            return false;
-        }
-
-        return CryptographicOperations.FixedTimeEquals(providedBytes, expectedBytes);
+        return CryptographicOperations.FixedTimeEquals(providedHash, expectedHash);
     }
 }

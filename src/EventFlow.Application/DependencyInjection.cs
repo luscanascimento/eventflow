@@ -19,6 +19,7 @@ public static class DependencyInjection
         services.AddScoped<OutboxProcessor>();
         services.AddScoped<IEventProcessor, EventProcessor>();
         services.AddScoped<IEventConsumerHandler, PaymentSettledHandler>();
+        services.AddScoped<IEventConsumerHandler, WebhookDeliveryHandler>();
 
         return services;
     }

@@ -1,15 +1,15 @@
 # EventFlow — Distributed Event-Driven Ingestion & Processing Platform in .NET
 
-[![.NET 9](https://img.shields.io/badge/.NET-9.0%20LTS-purple.svg)](https://dotnet.microsoft.com/)
+[![.NET 9](https://img.shields.io/badge/.NET-9.0%20STS-purple.svg)](https://dotnet.microsoft.com/)
 [![C# 13](https://img.shields.io/badge/C%23-13.0-blue.svg)](https://learn.microsoft.com/dotnet/csharp/)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-336791.svg)](https://www.postgresql.org/)
 [![RabbitMQ](https://img.shields.io/badge/RabbitMQ-3.13-FF6600.svg)](https://www.rabbitmq.com/)
 [![Redis](https://img.shields.io/badge/Redis-7-DC382D.svg)](https://redis.io/)
 [![OpenTelemetry](https://img.shields.io/badge/OpenTelemetry-Enabled-orange.svg)](https://opentelemetry.io/)
-[![Tests](https://img.shields.io/badge/Tests-206%20Passed%20(184%20Unit%20%2B%2022%20Integration)-brightgreen.svg)]()
+[![Tests](https://img.shields.io/badge/Tests-211%20Total%20(185%20Unit%20%2B%2026%20Integration)-brightgreen.svg)]()
 [![Code Quality](https://img.shields.io/badge/Warnings-0%20(TreatAsErrors)-success.svg)]()
 
-> 🚀 **Status:** Complete, robust, and chaos-engineering audited architecture (All 14 phases completed — Approved for Production).
+> 🚀 **Status:** Production-hardened distributed event processing reference architecture with transactional outbox, atomic leasing, hybrid idempotency, and defense-in-depth security.
 
 **EventFlow** is an enterprise-grade, distributed, event-driven system engineered for reliable ingestion, atomic transactional persistence, topic-based routing, and resilient asynchronous processing of mission-critical business events and webhooks (such as financial settlements, partner notifications, and transaction webhooks).
 
@@ -21,15 +21,17 @@ In traditional microservices and webhook architectures, the single largest opera
 
 EventFlow resolves this challenge by enforcing strict, end-to-end architectural guarantees:
 
-1. **Zero Data-Loss Guarantee:** **Transactional Outbox Pattern** in PostgreSQL. Storing immutable event payloads and queuing pending broker dispatches occur within the **same ACID database transaction**.
-2. **Safe Concurrent Asynchronous Dispatching:** Dedicated background workers consume pending outbox entries in batches using `SELECT ... FOR UPDATE SKIP LOCKED`, guaranteeing linear horizontal scaling across replicas without lock contention or duplicate worker fetches.
-3. **Three-Tier Hybrid Idempotency:** End-to-end protection against duplicated deliveries (*at-least-once*) combining:
+1. **At-Least-Once Delivery via Transactional Outbox:** Storing immutable event payloads and queuing pending broker dispatches occur within the **same ACID database transaction** in PostgreSQL.
+2. **Safe Concurrent Asynchronous Dispatching:** Dedicated background workers consume pending outbox entries in batches using atomic leasing (`SELECT ... FOR UPDATE SKIP LOCKED` inside an update CTE), preventing lock contention and holding database connections only for minimal milliseconds (disconnected during AMQP broker publication).
+3. **Publisher Confirmations & Return Detection:** AMQP channel confirmations are tracked asynchronously and unroutable messages trigger `BasicReturnAsync` handlers to detect broker topology misconfigurations.
+4. **Three-Tier Hybrid Idempotency:** End-to-end protection against duplicated deliveries (*at-least-once*) combining:
    - *In-Memory Fast Guard* in **Redis** (24h TTL).
    - Atomic in-flight distributed lock in **Redis** (`SET NX EX 30s` with safe release via Lua Scripts).
-   - Relational immutable single-source-of-truth in **PostgreSQL** (`UNIQUE(tenant_id, scope, idempotency_key)`).
-4. **Declarative Fault Tolerance (Polly v8):** 4-layer resilience pipeline featuring *Total Timeout*, *Exponential Backoff with Decorrelated Jitter*, *Circuit Breakers*, and *Attempt Timeouts*.
-5. **Secure by Default:** Active SSRF protection (`SsrfGuard`), constant-time API key verification (`CryptographicOperations.FixedTimeEquals`), Tenant/IP-partitioned Rate Limiting, Kestrel payload constraints (256 KB), and OWASP security headers.
-6. **End-to-End Distributed Observability:** Standardized **W3C TraceContext** (`traceparent`) propagation using **OpenTelemetry**, high-performance source-generated structured logging (`[LoggerMessage]`), and custom business/infrastructure metrics.
+   - Relational persistent atomic claim/lease in **PostgreSQL** (`UNIQUE(tenant_id, scope, idempotency_key)` with `Processing`/`Completed`/`Failed` states), ensuring race condition safety even if Redis is unavailable.
+5. **Declarative Fault Tolerance (Polly v8):** 4-layer resilience pipeline featuring *Total Timeout*, *Exponential Backoff with Decorrelated Jitter*, *Circuit Breakers*, and *Attempt Timeouts*.
+6. **Secure by Default:** Active SSRF protection (`SsrfGuard`) with DNS rebinding defense and IP-level socket validation, fail-closed constant-time API key verification (`CryptographicOperations.FixedTimeEquals` over SHA-256 digests), Composite Tenant/IP Rate Limiting, Kestrel payload constraints (256 KB), and OWASP security headers.
+7. **Dedicated Database Migration Service:** Automated schema provisioning via a dedicated `EventFlow.Migrator` container/service running before application startup.
+8. **End-to-End Distributed Observability:** Standardized **W3C TraceContext** (`traceparent`) propagation using **OpenTelemetry**, high-performance source-generated structured logging (`[LoggerMessage]`), and custom business/infrastructure metrics.
 
 ---
 
@@ -77,17 +79,20 @@ EventFlow resolves this challenge by enforcing strict, end-to-end architectural 
 
 ---
 
+---
+
 ## 🛠️ Technology Stack
 
-* **Language & Runtime:** .NET 9 LTS / C# 13 (`TreatWarningsAsErrors=true`).
+* **Language & Runtime:** .NET 9 STS / C# 13 (`TreatWarningsAsErrors=true`).
 * **API & Hosting:** ASP.NET Core Minimal APIs & `BackgroundService` Worker Services.
-* **Relational Persistence:** PostgreSQL 16 with Entity Framework Core 9 (explicit relational mappings, composite indexes, and `SKIP LOCKED`).
-* **Message Broker:** RabbitMQ 3.13 via official asynchronous driver `RabbitMQ.Client 7.x`.
+* **Relational Persistence:** PostgreSQL 16 with Entity Framework Core 9 (explicit relational mappings, composite indexes, and `SKIP LOCKED` CTE leasing).
+* **Database Migrations:** Dedicated `EventFlow.Migrator` standalone migration utility and orchestration container.
+* **Message Broker:** RabbitMQ 3.13 via official asynchronous driver `RabbitMQ.Client 7.x` with publisher confirmation tracking and unroutable return handling.
 * **Caching & Distributed Locks:** Redis 7 Alpine with `StackExchange.Redis` and atomic Lua scripts.
 * **Resilience:** Polly v8 (`Microsoft.Extensions.Resilience`).
 * **Validation:** FluentValidation (defensive regex validation and payload boundary limits).
 * **Observability:** OpenTelemetry .NET SDK (`ActivitySource`, `Meter`, OTLP gRPC for Jaeger).
-* **Security:** OWASP Security Headers, Constant-time Cryptography, SSRF Guard, and Sliding Window Rate Limiting.
+* **Security:** OWASP Security Headers, Constant-time Cryptography over SHA-256 digests, SSRF Guard with DNS Rebinding defense, and Sliding Window Rate Limiting.
 * **Testing:** xUnit, FluentAssertions, NSubstitute, WebApplicationFactory, and Testcontainers.
 
 ---
@@ -97,7 +102,8 @@ EventFlow resolves this challenge by enforcing strict, end-to-end architectural 
 ```text
 eventflow/
 ├── .github/workflows/ci.yml         # CI/CD GitHub Actions Pipeline (Lint, Test, Docker)
-├── docker-compose.yml               # Multi-container orchestration (Postgres, RabbitMQ, Redis, Jaeger, Api, Worker)
+├── docker-compose.yml               # Multi-container orchestration (Postgres, RabbitMQ, Redis, Jaeger, Migrator, Api, Worker)
+├── Dockerfile.migrator              # Multi-stage non-root container (UID 1654) for Database Migration
 ├── Dockerfile.api                   # Multi-stage non-root container (UID 1654) for the API
 ├── Dockerfile.worker                # Multi-stage non-root container (UID 1654) for the Worker
 ├── docs/
@@ -121,10 +127,11 @@ eventflow/
 │   ├── EventFlow.Application/       # Use cases, interfaces, orchestration, and FluentValidation rules
 │   ├── EventFlow.Domain/            # Immutable entities, Result Pattern, typed domain errors, telemetry
 │   ├── EventFlow.Infrastructure/    # EF Core 9, RabbitMQ 7.x, Redis Lua Locks, Polly v8, OpenTelemetry
+│   ├── EventFlow.Migrator/          # Standalone database migration runner with resilient retries
 │   └── EventFlow.Worker/            # BackgroundServices (OutboxDispatcherWorker & EventConsumerWorker)
 └── tests/
-    ├── EventFlow.UnitTests/         # 184 unit tests covering domain, application, and infrastructure
-    └── EventFlow.IntegrationTests/  # 22 integration tests utilizing Testcontainers and WebApplicationFactory
+    ├── EventFlow.UnitTests/         # 185 unit & chaos tests covering domain, application, and infrastructure
+    └── EventFlow.IntegrationTests/  # 26 integration tests utilizing Testcontainers and WebApplicationFactory
 ```
 
 ---
@@ -134,8 +141,8 @@ eventflow/
 All core architectural decisions are formally documented in [`docs/adr/`](docs/adr/):
 
 * [ADR-0001: Modular Monolith Architecture & Clean Layer Separation](docs/adr/0001-modular-architecture.md)
-* [ADR-0002: Transactional Outbox Pattern with Concurrent Safe SKIP LOCKED Polling](docs/adr/0002-transactional-outbox.md)
-* [ADR-0003: Hybrid Idempotency Strategy (Redis + PostgreSQL)](docs/adr/0003-idempotency-strategy.md)
+* [ADR-0002: Transactional Outbox Pattern with Concurrent Safe SKIP LOCKED Polling & Atomic Leasing](docs/adr/0002-transactional-outbox.md)
+* [ADR-0003: Hybrid Idempotency Strategy (Redis + PostgreSQL Relational Claim)](docs/adr/0003-idempotency-strategy.md)
 * [ADR-0004: Messaging Transport Selection (Direct RabbitMQ vs MassTransit)](docs/adr/0004-messaging-transport.md)
 * [ADR-0005: Declarative Fault Tolerance & Resilience Strategy (Polly v8)](docs/adr/0005-resilience-strategy.md)
 * [ADR-0006: Distributed Observability (OpenTelemetry & W3C TraceContext)](docs/adr/0006-observability-opentelemetry.md)
@@ -147,7 +154,7 @@ All core architectural decisions are formally documented in [`docs/adr/`](docs/a
 
 ### Option 1: Via Docker Compose (Recommended — Complete Environment)
 
-Spin up all services (PostgreSQL, RabbitMQ with Management UI, Redis, Jaeger UI, EventFlow.Api, and EventFlow.Worker):
+Spin up all services (PostgreSQL, RabbitMQ with Management UI, Redis, Jaeger UI, EventFlow.Migrator, EventFlow.Api, and EventFlow.Worker):
 
 ```bash
 docker compose up -d --build
@@ -169,12 +176,17 @@ docker compose up -d --build
 docker compose up -d postgres rabbitmq redis jaeger
 ```
 
-#### 2. Run the API:
+#### 2. Run Database Migrations:
+```bash
+dotnet run --project src/EventFlow.Migrator
+```
+
+#### 3. Run the API:
 ```bash
 dotnet run --project src/EventFlow.Api
 ```
 
-#### 3. Run the Worker in a separate terminal:
+#### 4. Run the Worker in a separate terminal:
 ```bash
 dotnet run --project src/EventFlow.Worker
 ```
@@ -304,7 +316,14 @@ curl -i -X DELETE http://localhost:8080/api/v1/dlq \
 ### 5. Health Checks (`GET /health`, `/health/live`, `/health/ready`)
 
 ```bash
+# Basic health check
 curl -i http://localhost:8080/health
+
+# Liveness probe (orchestrator process check)
+curl -i http://localhost:8080/health/live
+
+# Readiness probe (verifies PostgreSQL, RabbitMQ, and Redis connectivity)
+curl -i http://localhost:8080/health/ready
 ```
 
 ---
@@ -317,8 +336,8 @@ Every component within EventFlow instruments distributed tracing spans adhering 
 2. Select service `EventFlow.Api` or `EventFlow.Worker`.
 3. Inspect the distributed trace cascade:
    - `EventFlow.IngestEvent` (API Minimal Endpoint)
-   - `EventFlow.OutboxBatchDispatch` (Worker Outbox Processor)
-   - `EventFlow.ConsumerProcess` (Worker Event Consumer)
+   - `EventFlow.OutboxBatchDispatch` (Worker Outbox Processor with atomic lease claim)
+   - `EventFlow.ConsumerProcess` (Worker Event Consumer with idempotency check)
    - `EventFlow.HttpExternalDispatch` (External HTTP dispatch with Polly & SSRF Guard)
 
 ---
@@ -327,12 +346,12 @@ Every component within EventFlow instruments distributed tracing spans adhering 
 
 | Security Feature | Implementation Mechanism | Engineering Guarantee |
 | :--- | :--- | :--- |
-| **SSRF Protection** | `SsrfGuard` | Blocks RFC 1918 private subnets, loopback, and cloud metadata endpoints (`169.254.169.254`) |
-| **Timing Attack Defense** | `CryptographicOperations.FixedTimeEquals` | Constant-time API key verification immune to string length timing leaks |
-| **DoS Mitigation** | Kestrel 256KB request limits + Sliding Window Rate Limiting | 100 req/min per Tenant/IP with RFC 7807 429 ProblemDetails |
-| **OWASP Security Headers** | `SecurityHeadersMiddleware` | CSP, HSTS, X-Content-Type-Options: nosniff, X-Frame-Options: DENY, etc. |
-| **Container Isolation** | Multi-Stage Non-Root Dockerfiles | Dedicated `app` user (UID `1654`) without root privileges |
-| **Duplicate Execution Guard** | `HybridIdempotencyManager` | Redis atomic lock (Lua script) + Postgres composite UNIQUE constraint |
+| **SSRF Defense & DNS Rebinding** | `SsrfGuard` + `SafeSocketsHttpHandler` | Validates initial URI and connect callback socket IPs. Blocks RFC 1918 private subnets, loopback, IPv6 link-local, and cloud metadata endpoints (`169.254.169.254`). |
+| **Timing Attack Defense** | `CryptographicOperations.FixedTimeEquals` over SHA-256 digests | Constant-time API key verification immune to string length timing leaks. Fail-closed on startup in non-dev environments via `ValidateOnStart()`. |
+| **DoS Mitigation & Fair Sharing** | Kestrel 256KB request limits + Composite Sliding Window Rate Limiting | 100 req/min per `ip:tenant` partition with RFC 7807 429 ProblemDetails. |
+| **OWASP Security Headers** | `SecurityHeadersMiddleware` | CSP, HSTS, X-Content-Type-Options: nosniff, X-Frame-Options: DENY, Permissions-Policy, Referrer-Policy. |
+| **Container Isolation** | Multi-Stage Non-Root Dockerfiles | Dedicated `app` user (UID `1654`) without root privileges across Api, Worker, and Migrator. |
+| **Duplicate Execution Guard** | `HybridIdempotencyManager` | Redis atomic lock (Lua script) + Postgres relational atomic lease (`ProcessedEventStatus.Processing`) & composite UNIQUE constraint. |
 
 ---
 

@@ -7,5 +7,11 @@ namespace EventFlow.Infrastructure.Messaging;
 /// </summary>
 public interface IRabbitMqConnection : IAsyncDisposable
 {
+    bool IsConnected { get; }
+
     Task<IChannel> CreateChannelAsync(CancellationToken cancellationToken = default);
+
+    Task<IChannel> CreateChannelAsync(
+        CreateChannelOptions options,
+        CancellationToken cancellationToken = default);
 }

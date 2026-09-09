@@ -25,16 +25,26 @@ Decidimos implementar o **Transactional Outbox Pattern** com persistência relac
 * `Published` (2): Confirmada e entregue com sucesso ao broker de mensagens.
 * `DeadLettered` (3): Esgotou o número máximo de retries configurados sem sucesso.
 
-### 3. Polling Concorrente de Alto Desempenho:
-* O worker despachador (`OutboxProcessor`) consome lotes (`BatchSize = 20`) utilizando a query relacional:
+### 3. Polling Concorrente e Leasing Atômico:
+* O worker despachador (`OutboxProcessor`) adquire lotes (`BatchSize = 20`) via claim atômico com transação curta no PostgreSQL:
   ```sql
-  SELECT * FROM outbox_messages 
-  WHERE status = 0 
-  ORDER BY created_at ASC 
-  LIMIT @BatchSize 
-  FOR UPDATE SKIP LOCKED;
+  WITH pending_batch AS (
+      SELECT id FROM outbox_messages
+      WHERE (status = 0 OR (status = 1 AND locked_until_utc IS NOT NULL AND locked_until_utc < @NowUtc))
+      ORDER BY created_at ASC
+      LIMIT @BatchSize
+      FOR UPDATE SKIP LOCKED
+  )
+  UPDATE outbox_messages
+  SET status = 1,
+      lock_token = @LockToken,
+      locked_until_utc = @LockedUntilUtc
+  WHERE id IN (SELECT id FROM pending_batch)
+  RETURNING *;
   ```
-* O modificador `SKIP LOCKED` do PostgreSQL garante que workers simultâneos ignorem linhas já bloqueadas por outras transações ativas, eliminando esperas de lock e permitindo escalabilidade horizontal perfeitamente balanceada.
+* **Transações Curtas de Banco:** A transação do PostgreSQL é finalizada e a conexão é devolvida ao pool logo após o claim do lote. Durante a publicação AMQP no RabbitMQ, **nenhuma conexão relacional é retida**.
+* **Proteção contra Crashes (Lease Expiration):** Se um worker sofrer crash durante a publicação, o lease expira (`locked_until_utc < @NowUtc`) e outro worker retoma o lote automaticamente.
+* **Confirmação e Concorrência:** O status final (`Published` ou `Pending` com retry) é atualizado conferindo o `lock_token` proprietário para evitar sobrescritas acidentais.
 
 ### 4. Backoff Exponencial e Retries de Despacho:
 * Falhas transitórias de rede com o RabbitMQ incrementam `retry_count` e calculam o próximo instante de tentativa (`next_retry_at`) com backoff exponencial.

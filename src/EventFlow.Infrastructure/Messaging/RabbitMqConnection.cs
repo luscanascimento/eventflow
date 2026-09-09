@@ -38,12 +38,31 @@ public sealed partial class RabbitMqConnection : IRabbitMqConnection
         };
     }
 
-    public async Task<IChannel> CreateChannelAsync(CancellationToken cancellationToken = default)
+    public bool IsConnected => _connection is { IsOpen: true };
+
+    public Task<IChannel> CreateChannelAsync(CancellationToken cancellationToken = default)
+    {
+        return CreateChannelInternalAsync(null, cancellationToken);
+    }
+
+    public Task<IChannel> CreateChannelAsync(
+        CreateChannelOptions options,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+        return CreateChannelInternalAsync(options, cancellationToken);
+    }
+
+    private async Task<IChannel> CreateChannelInternalAsync(
+        CreateChannelOptions? options,
+        CancellationToken cancellationToken)
     {
         ObjectDisposedException.ThrowIf(_isDisposed, this);
 
         var connection = await GetOrCreateConnectionAsync(cancellationToken);
-        var channel = await connection.CreateChannelAsync(cancellationToken: cancellationToken);
+        var channel = options != null
+            ? await connection.CreateChannelAsync(options, cancellationToken)
+            : await connection.CreateChannelAsync(cancellationToken: cancellationToken);
 
         // Ensure topic exchange is idempotently declared
         await channel.ExchangeDeclareAsync(

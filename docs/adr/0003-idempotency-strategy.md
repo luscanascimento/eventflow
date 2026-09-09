@@ -27,13 +27,14 @@ Decidimos implementar uma **Estratégia de Idempotência Híbrida em Três Camad
    * Comando: `SET key token NX EX 30` (adquirido apenas se não existir, com TTL de 30 segundos).
    * Liberação Atômica: Script Lua que verifica a posse do token (`ARGV[1] == KEYS[1]`) antes de deletar a chave, evitando que um worker libere acidentalmente o lock renovado/adquirido por outra réplica.
 
-3. **Garantia Relacional Permanente (PostgreSQL Imutável):**
+3. **Garantia Relacional Permanente & Claim Atômico (PostgreSQL Imutável):**
    * Tabela: `processed_events`
    * Constraint única estrita: `UNIQUE (tenant_id, scope, idempotency_key)`
-   * Objetivo: Fonte definitiva da verdade (*Single Source of Truth*). Garante consistência ACID mesmo que o Redis caia ou perca dados.
+   * Ciclo de Vida: Status `Processing` (com `lock_token` e `locked_until_utc`) inserido atomicamente **antes** do efeito colateral de negócio, e atualizado para `Completed` após a conclusão com sucesso.
+   * Objetivo: Fonte definitiva da verdade (*Single Source of Truth*). Garante consistência ACID e proteção contra race conditions mesmo quando o Redis estiver desativado ou inalcançável.
 
 4. **Degradação Graciosa (Graceful Fallback):**
-   * Se o Redis estiver indisponível (queda de rede, timeout), o sistema loga um alerta e prossegue consultando e gravando diretamente no PostgreSQL. O processamento nunca é interrompido indevidamente.
+   * Se o Redis estiver indisponível (queda de rede, timeout), o `HybridIdempotencyManager` registra um aviso e recorre ao claim atômico relacional diretamente no PostgreSQL com tratamento de violação de chave única (`23505`). O processamento preserva a consistência e nunca é corrompido.
 
 ## Alternativas Consideradas
 * **Apenas Redis com `KeyExists`:** Rejeitado por não ser atômico, não prevenir race conditions e ser vulnerável a perda de dados.

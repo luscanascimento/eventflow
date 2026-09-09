@@ -1,8 +1,8 @@
 # EventFlow — Master Engineering Blueprint & Roadmap
 
-> **Status:** Draft / Approved for Phase 1  
+> **Status:** Architecture Master Plan & Roadmap  
 > **Role & Level:** Staff / Principal Software Engineer  
-> **Runtime Target:** .NET 9 LTS / .NET 10 Ready (C# 13/14)  
+> **Runtime Target:** .NET 9 STS / .NET 10 Ready (C# 13/14)  
 > **Repository:** `eventflow`
 
 ---
@@ -14,14 +14,14 @@ O **EventFlow** é uma plataforma distribuída para ingestão, persistência res
 ### 1.1 Requisitos Funcionais (FR)
 - **FR-01 (Ingestão Segura e Rápida):** A API HTTP deve receber payloads de eventos em lote ou unitários, autenticar a origem, validar o schema estritamente e persistir o evento com latência mínima (P99 < 50ms).
 - **FR-02 (Garantia Transacional de Entrega - Outbox):** A gravação do estado do negócio e o registro do evento para despacho devem ocorrer na mesma transação atômica ACID no PostgreSQL.
-- **FR-03 (Despacho Confiável para Broker):** Um worker dedicado (Outbox Processor) deve despachar eventos pendentes para o broker (RabbitMQ) garantindo entrega *at-least-once*, com suporte a particionamento lógico e ordenação quando exigido.
-- **FR-04 (Processamento Assíncrono com Idempotência Estrita):** Os consumidores (Workers) devem processar eventos garantindo execução *exactly-once logicamente* através de verificação de chave de idempotência atômica e constraints relacionais.
+- **FR-03 (Despacho Confiável para Broker):** Um worker dedicado (Outbox Processor) deve despachar eventos pendentes para o broker (RabbitMQ) garantindo entrega *at-least-once*, com suporte a particionamento lógico, atomic leasing e ordenação quando exigido.
+- **FR-04 (Processamento Assíncrono com Idempotência Estrita):** Os consumidores (Workers) devem processar eventos garantindo execução *logicamente idempotente* através de verificação de chave de idempotência atômica (PostgreSQL persistent lease + Redis fast guard).
 - **FR-05 (Resiliência e Políticas de Falha):** Falhas transitórias no envio ou processamento externo devem disparar retries com exponential backoff e jitter. Falhas não recuperáveis devem ser encaminhadas para Dead Letter Queue (DLQ) com enriquecimento de contexto de erro.
 - **FR-06 (Observabilidade e Rastreabilidade End-to-End):** Todo o ciclo de vida de um evento (HTTP -> DB -> Outbox -> RabbitMQ -> Consumer -> Destino) deve compartilhar o mesmo W3C TraceContext (`traceparent`), permitindo rastreabilidade contínua em APM/Jaeger.
 
 ### 1.2 Requisitos Não Funcionais (NFR)
-- **NFR-01 (Confiabilidade Zero Data-Loss):** Nenhuma falha de rede temporária com broker ou crash de processo pode resultar em perda de eventos já aceitos pela API com HTTP 202/200.
-- **NFR-02 (Segurança por Padrão):** Validação estrita de input, ausência de mass assignment, mitigação de SSRF em webhooks externos, autenticação robusta e isolamento por tenant/recurso.
+- **NFR-01 (Confiabilidade At-Least-Once & No Silent Loss):** Nenhuma falha de rede temporária com broker ou crash de processo pode resultar em perda de eventos já aceitos pela API com HTTP 202/200.
+- **NFR-02 (Segurança por Padrão):** Validação estrita de input, ausência de mass assignment, mitigação de SSRF e DNS rebinding em webhooks externos, autenticação robusta e isolamento por tenant/recurso.
 - **NFR-03 (Simplicidade e Manutenibilidade):** Proibição expressa de abstrações desnecessárias (ex.: Generic Repository genérico sobre EF Core, MediatR artificial sem necessidade, microserviços artificiais antes de consolidar o monólito modular).
 
 ---
@@ -207,6 +207,9 @@ eventflow/
 │   │   ├── Endpoints/       (Event Ingestion Endpoints)
 │   │   ├── Middleware/      (Exception Handling, TraceContext, RateLimiting)
 │   │   ├── Program.cs
+│   │   └── appsettings.json
+│   ├── EventFlow.Migrator/
+│   │   ├── Program.cs       (Standalone resilient migration runner)
 │   │   └── appsettings.json
 │   └── EventFlow.Worker/
 │       ├── BackgroundServices/ (OutboxDispatcherWorker, EventConsumerWorker)

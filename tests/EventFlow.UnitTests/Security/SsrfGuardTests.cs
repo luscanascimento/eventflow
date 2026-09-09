@@ -13,7 +13,7 @@ public class SsrfGuardTests
     [InlineData("http://example.com/webhook")]
     public void IsSafeTarget_WhenPublicHttpUrl_ShouldReturnTrue(string url)
     {
-        bool isSafe = SsrfGuard.IsSafeTarget(new Uri(url), allowPrivateAddresses: true);
+        bool isSafe = SsrfGuard.IsSafeTarget(new Uri(url));
 
         isSafe.Should().BeTrue();
     }
@@ -25,7 +25,7 @@ public class SsrfGuardTests
     [InlineData("ldap://ldap.example.com")]
     public void IsSafeTarget_WhenInvalidScheme_ShouldReturnFalse(string url)
     {
-        bool isSafe = SsrfGuard.IsSafeTarget(new Uri(url), allowPrivateAddresses: true);
+        bool isSafe = SsrfGuard.IsSafeTarget(new Uri(url));
 
         isSafe.Should().BeFalse();
     }
@@ -37,11 +37,26 @@ public class SsrfGuardTests
     [InlineData("http://192.168.1.1/internal")]
     [InlineData("http://172.16.0.1/secrets")]
     [InlineData("http://169.254.169.254/latest/meta-data/")]
-    public void IsSafeTarget_WhenPrivateOrLoopbackAndNotAllowed_ShouldReturnFalse(string url)
+    public void IsSafeTarget_WhenPrivateOrLoopback_ShouldReturnFalseByDefault(string url)
     {
-        bool isSafe = SsrfGuard.IsSafeTarget(new Uri(url), allowPrivateAddresses: false);
+        bool isSafe = SsrfGuard.IsSafeTarget(new Uri(url));
 
         isSafe.Should().BeFalse();
+    }
+
+    [Fact]
+    public void IsSafeTarget_WhenExplicitlyAllowedInSsrfOptions_ShouldReturnTrue()
+    {
+        var options = new SsrfOptions
+        {
+            AllowedHosts = { "10.0.0.1", "internal.corp.local" }
+        };
+
+        bool isAllowed = SsrfGuard.IsSafeTarget(new Uri("http://10.0.0.1/webhook"), options);
+        bool isHostAllowed = SsrfGuard.IsSafeTarget(new Uri("http://internal.corp.local/webhook"), options);
+
+        isAllowed.Should().BeTrue();
+        isHostAllowed.Should().BeTrue();
     }
 
     [Theory]

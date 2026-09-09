@@ -74,6 +74,14 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      - name: Build EventFlow Migrator Container Image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.migrator
+          push: false
+          tags: eventflow-migrator:ci-test
+
       - name: Build EventFlow API Container Image
         uses: docker/build-push-action@v6
         with:
