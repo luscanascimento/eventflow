@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using EventFlow.Application.Abstractions;
 using EventFlow.Application.Idempotency;
 using EventFlow.Domain.Idempotency;
@@ -27,6 +28,7 @@ public sealed partial class HybridIdempotencyManager : IIdempotencyManager
     private readonly IDateTimeProvider _dateTimeProvider;
     private readonly RedisOptions _options;
     private readonly ILogger<HybridIdempotencyManager> _logger;
+    private readonly ConcurrentDictionary<string, string> _activeLocks = new(StringComparer.Ordinal);
 
     public HybridIdempotencyManager(
         IRedisConnection redisConnection,
@@ -116,10 +118,6 @@ public sealed partial class HybridIdempotencyManager : IIdempotencyManager
                         try
                         {
                             await redis.StringSetAsync(cacheKey, "1", TimeSpan.FromHours(_options.CacheTtlHours));
-                            if (redisLockAcquired)
-                            {
-                                await ReleaseRedisLockAsync(redis, lockKey, lockToken);
-                            }
                         }
                         catch (Exception ex)
                         {
@@ -127,6 +125,7 @@ public sealed partial class HybridIdempotencyManager : IIdempotencyManager
                         }
                     }
 
+                    await ReleaseAcquiredRedisLockSafelyAsync(redis, redisLockAcquired, lockKey, lockToken);
                     return IdempotencyAcquireResult.AlreadyProcessed();
                 }
 
@@ -135,17 +134,24 @@ public sealed partial class HybridIdempotencyManager : IIdempotencyManager
                     existingRecord.LockedUntilUtc.Value > now)
                 {
                     LogLockConflict(_logger, eventId, tenantId, scope, idempotencyKey);
+                    await ReleaseAcquiredRedisLockSafelyAsync(redis, redisLockAcquired, lockKey, lockToken);
                     return IdempotencyAcquireResult.ConflictInFlight();
                 }
 
                 // Reclaim expired lease or failed state
                 var claimResult = existingRecord.Claim(lockToken, lockExpiry, eventId, string.Empty);
-                if (claimResult.IsSuccess)
+                if (claimResult.IsFailure)
                 {
-                    await _dbContext.SaveChangesAsync(cancellationToken);
-                    LogLockAcquired(_logger, eventId, tenantId, scope, idempotencyKey);
-                    return IdempotencyAcquireResult.Acquired(lockToken);
+                    await ReleaseAcquiredRedisLockSafelyAsync(redis, redisLockAcquired, lockKey, lockToken);
+                    return existingRecord.Status == ProcessedEventStatus.Completed
+                        ? IdempotencyAcquireResult.AlreadyProcessed()
+                        : IdempotencyAcquireResult.ConflictInFlight();
                 }
+
+                await _dbContext.SaveChangesAsync(cancellationToken);
+                _activeLocks[lockKey] = lockToken;
+                LogLockAcquired(_logger, eventId, tenantId, scope, idempotencyKey);
+                return IdempotencyAcquireResult.Acquired(lockToken);
             }
 
             // Create initial processing record
@@ -161,18 +167,22 @@ public sealed partial class HybridIdempotencyManager : IIdempotencyManager
 
             if (newRecordResult.IsFailure)
             {
+                await ReleaseAcquiredRedisLockSafelyAsync(redis, redisLockAcquired, lockKey, lockToken);
                 return IdempotencyAcquireResult.ConflictInFlight();
             }
 
             _dbContext.ProcessedEvents.Add(newRecordResult.Value);
             await _dbContext.SaveChangesAsync(cancellationToken);
 
+            _activeLocks[lockKey] = lockToken;
             LogLockAcquired(_logger, eventId, tenantId, scope, idempotencyKey);
             return IdempotencyAcquireResult.Acquired(lockToken);
         }
         catch (DbUpdateException ex)
         {
             LogConcurrentDbConflict(_logger, tenantId, scope, idempotencyKey, ex.Message);
+
+            await ReleaseAcquiredRedisLockSafelyAsync(redis, redisLockAcquired, lockKey, lockToken);
 
             // Detach tracked entity on conflict and re-evaluate DB state
             _dbContext.ChangeTracker.Clear();
@@ -188,6 +198,11 @@ public sealed partial class HybridIdempotencyManager : IIdempotencyManager
 
             return IdempotencyAcquireResult.ConflictInFlight();
         }
+        catch
+        {
+            await ReleaseAcquiredRedisLockSafelyAsync(redis, redisLockAcquired, lockKey, lockToken);
+            throw;
+        }
     }
 
     public async Task MarkCompletedAsync(
@@ -200,13 +215,17 @@ public sealed partial class HybridIdempotencyManager : IIdempotencyManager
         CancellationToken cancellationToken = default)
     {
         DateTimeOffset now = _dateTimeProvider.UtcNow;
+        string cacheKey = BuildCacheKey(tenantId, scope, idempotencyKey);
+        string lockKey = BuildLockKey(tenantId, scope, idempotencyKey);
+
+        _activeLocks.TryRemove(lockKey, out string? activeLockToken);
 
         var record = await _dbContext.ProcessedEvents
             .FirstOrDefaultAsync(p => p.TenantId == tenantId && p.Scope == scope && p.IdempotencyKey == idempotencyKey, cancellationToken);
 
         if (record != null)
         {
-            record.MarkCompleted(record.LockToken, resultSummary, now);
+            record.MarkCompleted(activeLockToken ?? record.LockToken, resultSummary, now, eventType);
         }
         else
         {
@@ -224,19 +243,24 @@ public sealed partial class HybridIdempotencyManager : IIdempotencyManager
         }
         catch (DbUpdateException ex)
         {
+            _dbContext.ChangeTracker.Clear();
             LogConcurrentDbConflict(_logger, tenantId, scope, idempotencyKey, ex.Message);
         }
 
         IDatabase? redis = _redisConnection.GetDatabase();
         if (redis != null)
         {
-            string cacheKey = BuildCacheKey(tenantId, scope, idempotencyKey);
-            string lockKey = BuildLockKey(tenantId, scope, idempotencyKey);
-
             try
             {
                 await redis.StringSetAsync(cacheKey, "1", TimeSpan.FromHours(_options.CacheTtlHours));
-                await redis.KeyDeleteAsync(lockKey);
+                if (!string.IsNullOrWhiteSpace(activeLockToken))
+                {
+                    await ReleaseRedisLockAsync(redis, lockKey, activeLockToken);
+                }
+                else
+                {
+                    await redis.KeyDeleteAsync(lockKey);
+                }
             }
             catch (Exception ex)
             {
@@ -252,6 +276,9 @@ public sealed partial class HybridIdempotencyManager : IIdempotencyManager
         string? lockToken,
         CancellationToken cancellationToken = default)
     {
+        string lockKey = BuildLockKey(tenantId, scope, idempotencyKey);
+        _activeLocks.TryRemove(lockKey, out _);
+
         try
         {
             var record = await _dbContext.ProcessedEvents
@@ -259,12 +286,16 @@ public sealed partial class HybridIdempotencyManager : IIdempotencyManager
 
             if (record != null && (string.IsNullOrEmpty(lockToken) || record.LockToken == lockToken))
             {
-                record.MarkFailed(lockToken);
-                await _dbContext.SaveChangesAsync(cancellationToken);
+                var markResult = record.MarkFailed(lockToken);
+                if (markResult.IsSuccess)
+                {
+                    await _dbContext.SaveChangesAsync(cancellationToken);
+                }
             }
         }
         catch (Exception ex)
         {
+            _dbContext.ChangeTracker.Clear();
             LogReleaseError(_logger, tenantId, scope, idempotencyKey, ex);
         }
 
@@ -273,7 +304,6 @@ public sealed partial class HybridIdempotencyManager : IIdempotencyManager
             IDatabase? redis = _redisConnection.GetDatabase();
             if (redis != null)
             {
-                string lockKey = BuildLockKey(tenantId, scope, idempotencyKey);
                 try
                 {
                     await ReleaseRedisLockAsync(redis, lockKey, lockToken);
@@ -284,6 +314,27 @@ public sealed partial class HybridIdempotencyManager : IIdempotencyManager
                     LogRedisError(_logger, "releasing lock in Redis", ex);
                 }
             }
+        }
+    }
+
+    private async Task ReleaseAcquiredRedisLockSafelyAsync(
+        IDatabase? redis,
+        bool redisLockAcquired,
+        string lockKey,
+        string lockToken)
+    {
+        if (!redisLockAcquired || redis == null)
+        {
+            return;
+        }
+
+        try
+        {
+            await ReleaseRedisLockAsync(redis, lockKey, lockToken);
+        }
+        catch (Exception ex)
+        {
+            LogRedisError(_logger, "releasing lock after DB conflict", ex);
         }
     }
 

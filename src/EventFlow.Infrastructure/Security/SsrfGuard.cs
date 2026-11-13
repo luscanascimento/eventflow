@@ -41,6 +41,11 @@ public static class SsrfGuard
             return options?.AllowedHosts.Contains(targetUri.Host) == true || (options?.AllowPrivateNetworks == true);
         }
 
+        if (options?.AllowedHosts.Contains(targetUri.Host) == true)
+        {
+            return true;
+        }
+
         // 3. Resolve host IPs and verify against private / dangerous ranges
         try
         {
@@ -77,6 +82,8 @@ public static class SsrfGuard
     /// </summary>
     public static bool IsIpAllowed(IPAddress ip, string host, SsrfOptions? options = null)
     {
+        ArgumentNullException.ThrowIfNull(ip);
+
         if (options?.AllowedHosts.Contains(host) == true ||
             options?.AllowedHosts.Contains(ip.ToString()) == true)
         {
@@ -96,7 +103,9 @@ public static class SsrfGuard
     /// </summary>
     public static bool IsPrivateOrReserved(IPAddress ip)
     {
-        if (IPAddress.IsLoopback(ip))
+        ArgumentNullException.ThrowIfNull(ip);
+
+        if (ip.Equals(IPAddress.Any) || ip.Equals(IPAddress.IPv6Any) || IPAddress.IsLoopback(ip))
         {
             return true;
         }
@@ -122,6 +131,24 @@ public static class SsrfGuard
                 return IsPrivateOrReserved(ip.MapToIPv4());
             }
 
+            // IPv4-compatible IPv6 address (::x.x.x.x where first 12 bytes are 0)
+            bool isIpv4Compatible = true;
+            for (int i = 0; i < 12; i++)
+            {
+                if (v6Bytes[i] != 0)
+                {
+                    isIpv4Compatible = false;
+                    break;
+                }
+            }
+
+            if (isIpv4Compatible)
+            {
+                byte[] v4Bytes = new byte[4];
+                Array.Copy(v6Bytes, 12, v4Bytes, 0, 4);
+                return IsPrivateOrReserved(new IPAddress(v4Bytes));
+            }
+
             return false;
         }
 
@@ -135,6 +162,12 @@ public static class SsrfGuard
 
         // 10.0.0.0/8 (RFC 1918 Private)
         if (bytes[0] == 10)
+        {
+            return true;
+        }
+
+        // 100.64.0.0/10 (RFC 6598 Shared Address Space / CGNAT & Alibaba Cloud Metadata 100.100.100.200)
+        if (bytes[0] == 100 && bytes[1] >= 64 && bytes[1] <= 127)
         {
             return true;
         }
@@ -163,6 +196,12 @@ public static class SsrfGuard
             return true;
         }
 
+        // 198.18.0.0/15 (RFC 2544 Benchmarking)
+        if (bytes[0] == 198 && (bytes[1] == 18 || bytes[1] == 19))
+        {
+            return true;
+        }
+
         // 224.0.0.0/4 (Multicast) & 240.0.0.0/4 (Reserved)
         if (bytes[0] >= 224)
         {
@@ -174,12 +213,13 @@ public static class SsrfGuard
 
     /// <summary>
     /// Creates a hardened SocketsHttpHandler configured to validate resolved socket IP addresses
-    /// at connect time to prevent DNS rebinding attacks.
+    /// at connect time to prevent DNS rebinding attacks and disallow automatic open redirects.
     /// </summary>
     public static SocketsHttpHandler CreateSafeSocketsHttpHandler(SsrfOptions? options = null)
     {
         return new SocketsHttpHandler
         {
+            AllowAutoRedirect = false,
             ConnectCallback = async (context, cancellationToken) =>
             {
                 var host = context.DnsEndPoint.Host;

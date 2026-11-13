@@ -6,7 +6,7 @@ namespace EventFlow.Infrastructure.Messaging;
 
 /// <summary>
 /// Resilient connection manager for RabbitMQ that lazily establishes the connection
-/// and ensures the primary topic exchange topology is declared.
+/// and ensures the primary topic exchange and dead-letter topology are declared.
 /// </summary>
 public sealed partial class RabbitMqConnection : IRabbitMqConnection
 {
@@ -60,20 +60,38 @@ public sealed partial class RabbitMqConnection : IRabbitMqConnection
         ObjectDisposedException.ThrowIf(_isDisposed, this);
 
         var connection = await GetOrCreateConnectionAsync(cancellationToken);
-        var channel = options != null
-            ? await connection.CreateChannelAsync(options, cancellationToken)
-            : await connection.CreateChannelAsync(cancellationToken: cancellationToken);
+        var effectiveOptions = options ?? new CreateChannelOptions(
+            publisherConfirmationsEnabled: true,
+            publisherConfirmationTrackingEnabled: true);
 
-        // Ensure topic exchange is idempotently declared
-        await channel.ExchangeDeclareAsync(
-            exchange: _options.ExchangeName,
-            type: ExchangeType.Topic,
-            durable: true,
-            autoDelete: false,
-            arguments: null,
-            cancellationToken: cancellationToken);
+        var channel = await connection.CreateChannelAsync(effectiveOptions, cancellationToken);
 
-        return channel;
+        try
+        {
+            // Ensure topic exchange is idempotently declared
+            await channel.ExchangeDeclareAsync(
+                exchange: _options.ExchangeName,
+                type: ExchangeType.Topic,
+                durable: true,
+                autoDelete: false,
+                arguments: null,
+                cancellationToken: cancellationToken);
+
+            return channel;
+        }
+        catch
+        {
+            try
+            {
+                await channel.DisposeAsync();
+            }
+            catch
+            {
+                // Ignore disposal errors during exception unwinding
+            }
+
+            throw;
+        }
     }
 
     private async Task<IConnection> GetOrCreateConnectionAsync(CancellationToken cancellationToken)
@@ -86,13 +104,27 @@ public sealed partial class RabbitMqConnection : IRabbitMqConnection
         await _connectionLock.WaitAsync(cancellationToken);
         try
         {
+            ObjectDisposedException.ThrowIf(_isDisposed, this);
+
             if (_connection is { IsOpen: true })
             {
                 return _connection;
             }
 
             LogConnecting(_logger, _options.HostName, _options.Port);
-            _connection = await _factory.CreateConnectionAsync(cancellationToken);
+            var connection = await _factory.CreateConnectionAsync(cancellationToken);
+
+            try
+            {
+                await EnsureTopologyDeclaredAsync(connection, cancellationToken);
+            }
+            catch
+            {
+                await connection.DisposeAsync();
+                throw;
+            }
+
+            _connection = connection;
             LogConnected(_logger, _options.HostName, _options.Port);
 
             return _connection;
@@ -103,6 +135,62 @@ public sealed partial class RabbitMqConnection : IRabbitMqConnection
         }
     }
 
+    private async Task EnsureTopologyDeclaredAsync(IConnection connection, CancellationToken cancellationToken)
+    {
+        await using var setupChannel = await connection.CreateChannelAsync(cancellationToken: cancellationToken);
+
+        await setupChannel.ExchangeDeclareAsync(
+            exchange: _options.ExchangeName,
+            type: ExchangeType.Topic,
+            durable: true,
+            autoDelete: false,
+            arguments: null,
+            cancellationToken: cancellationToken);
+
+        await setupChannel.ExchangeDeclareAsync(
+            exchange: _options.DlxExchangeName,
+            type: ExchangeType.Topic,
+            durable: true,
+            autoDelete: false,
+            arguments: null,
+            cancellationToken: cancellationToken);
+
+        await setupChannel.QueueDeclareAsync(
+            queue: _options.DlqQueueName,
+            durable: true,
+            exclusive: false,
+            autoDelete: false,
+            arguments: null,
+            cancellationToken: cancellationToken);
+
+        await setupChannel.QueueBindAsync(
+            queue: _options.DlqQueueName,
+            exchange: _options.DlxExchangeName,
+            routingKey: "#",
+            arguments: null,
+            cancellationToken: cancellationToken);
+
+        var queueArguments = new Dictionary<string, object?>
+        {
+            ["x-dead-letter-exchange"] = _options.DlxExchangeName
+        };
+
+        await setupChannel.QueueDeclareAsync(
+            queue: _options.QueueName,
+            durable: true,
+            exclusive: false,
+            autoDelete: false,
+            arguments: queueArguments,
+            cancellationToken: cancellationToken);
+
+        await setupChannel.QueueBindAsync(
+            queue: _options.QueueName,
+            exchange: _options.ExchangeName,
+            routingKey: _options.RoutingKeyPattern,
+            arguments: null,
+            cancellationToken: cancellationToken);
+    }
+
     public async ValueTask DisposeAsync()
     {
         if (_isDisposed)
@@ -110,22 +198,36 @@ public sealed partial class RabbitMqConnection : IRabbitMqConnection
             return;
         }
 
-        _isDisposed = true;
-
-        if (_connection != null)
+        await _connectionLock.WaitAsync();
+        try
         {
-            try
+            if (_isDisposed)
             {
-                await _connection.CloseAsync();
-                await _connection.DisposeAsync();
+                return;
             }
-            catch (Exception ex)
+
+            _isDisposed = true;
+
+            if (_connection != null)
             {
-                LogDisposeError(_logger, ex);
+                try
+                {
+                    await _connection.CloseAsync();
+                    await _connection.DisposeAsync();
+                }
+                catch (Exception ex)
+                {
+                    LogDisposeError(_logger, ex);
+                }
+
+                _connection = null;
             }
         }
-
-        _connectionLock.Dispose();
+        finally
+        {
+            _connectionLock.Release();
+            _connectionLock.Dispose();
+        }
     }
 
     [LoggerMessage(EventId = 5001, Level = LogLevel.Information, Message = "Connecting to RabbitMQ broker at {Host}:{Port}...")]

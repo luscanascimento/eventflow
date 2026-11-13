@@ -11,7 +11,9 @@ public sealed partial class RedisConnection : IRedisConnection
 {
     private readonly RedisOptions _options;
     private readonly ILogger<RedisConnection> _logger;
-    private readonly Lazy<ConnectionMultiplexer?> _lazyConnection;
+    private readonly object _connectionLock = new();
+    private ConnectionMultiplexer? _connection;
+    private bool _loggedDisabled;
     private bool _isDisposed;
 
     public RedisConnection(
@@ -20,34 +22,6 @@ public sealed partial class RedisConnection : IRedisConnection
     {
         _options = options.Value;
         _logger = logger;
-
-        _lazyConnection = new Lazy<ConnectionMultiplexer?>(() =>
-        {
-            if (!_options.Enabled || string.IsNullOrWhiteSpace(_options.ConnectionString))
-            {
-                LogRedisDisabled(_logger);
-                return null;
-            }
-
-            try
-            {
-                LogConnectingToRedis(_logger, _options.ConnectionString);
-
-                var configuration = ConfigurationOptions.Parse(_options.ConnectionString);
-                configuration.AbortOnConnectFail = false;
-                configuration.ConnectTimeout = 5000;
-                configuration.SyncTimeout = 5000;
-
-                var connection = ConnectionMultiplexer.Connect(configuration);
-                LogConnectedToRedis(_logger);
-                return connection;
-            }
-            catch (Exception ex)
-            {
-                LogConnectionFailed(_logger, ex);
-                return null;
-            }
-        });
     }
 
     public IDatabase? GetDatabase()
@@ -59,7 +33,7 @@ public sealed partial class RedisConnection : IRedisConnection
 
         try
         {
-            var connection = _lazyConnection.Value;
+            var connection = GetOrCreateConnection();
             if (connection is { IsConnected: true })
             {
                 return connection.GetDatabase();
@@ -73,27 +47,83 @@ public sealed partial class RedisConnection : IRedisConnection
         return null;
     }
 
-    public bool IsConnected => !_isDisposed && _lazyConnection.IsValueCreated && _lazyConnection.Value is { IsConnected: true };
+    public bool IsConnected => !_isDisposed && _connection is { IsConnected: true };
 
-    public ValueTask DisposeAsync()
+    private ConnectionMultiplexer? GetOrCreateConnection()
     {
-        if (_isDisposed)
+        if (_connection != null)
         {
-            return ValueTask.CompletedTask;
+            return _connection;
         }
 
-        _isDisposed = true;
-
-        if (_lazyConnection.IsValueCreated && _lazyConnection.Value != null)
+        lock (_connectionLock)
         {
+            if (_isDisposed)
+            {
+                return null;
+            }
+
+            if (_connection != null)
+            {
+                return _connection;
+            }
+
+            if (!_options.Enabled || string.IsNullOrWhiteSpace(_options.ConnectionString))
+            {
+                if (!_loggedDisabled)
+                {
+                    LogRedisDisabled(_logger);
+                    _loggedDisabled = true;
+                }
+
+                return null;
+            }
+
             try
             {
-                _lazyConnection.Value.Dispose();
-                LogRedisDisposed(_logger);
+                LogConnectingToRedis(_logger, _options.ConnectionString);
+
+                var configuration = ConfigurationOptions.Parse(_options.ConnectionString);
+                configuration.AbortOnConnectFail = false;
+                configuration.ConnectTimeout = 5000;
+                configuration.SyncTimeout = 5000;
+
+                _connection = ConnectionMultiplexer.Connect(configuration);
+                LogConnectedToRedis(_logger);
+                return _connection;
             }
             catch (Exception ex)
             {
-                LogDisposeError(_logger, ex);
+                LogConnectionFailed(_logger, ex);
+                return null;
+            }
+        }
+    }
+
+    public ValueTask DisposeAsync()
+    {
+        lock (_connectionLock)
+        {
+            if (_isDisposed)
+            {
+                return ValueTask.CompletedTask;
+            }
+
+            _isDisposed = true;
+
+            if (_connection != null)
+            {
+                try
+                {
+                    _connection.Dispose();
+                    LogRedisDisposed(_logger);
+                }
+                catch (Exception ex)
+                {
+                    LogDisposeError(_logger, ex);
+                }
+
+                _connection = null;
             }
         }
 

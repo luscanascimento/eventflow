@@ -30,6 +30,8 @@ public sealed partial class RabbitMqEventPublisher : IEventPublisher
 
     public async Task<Result> PublishAsync(OutboxMessage message, CancellationToken cancellationToken = default)
     {
+        ArgumentNullException.ThrowIfNull(message);
+
         try
         {
             var channelOptions = new CreateChannelOptions(
@@ -48,6 +50,10 @@ public sealed partial class RabbitMqEventPublisher : IEventPublisher
                 return Task.CompletedTask;
             };
 
+            string correlationId = !string.IsNullOrWhiteSpace(message.CorrelationId)
+                ? message.CorrelationId
+                : message.EventId.ToString("D");
+
             var properties = new BasicProperties
             {
                 ContentType = "application/json",
@@ -58,9 +64,16 @@ public sealed partial class RabbitMqEventPublisher : IEventPublisher
                 {
                     ["tenant_id"] = message.TenantId,
                     ["event_type"] = message.EventType,
-                    ["outbox_id"] = message.Id.ToString("D")
+                    ["outbox_id"] = message.Id.ToString("D"),
+                    ["correlation_id"] = correlationId,
+                    ["version"] = message.Version
                 }
             };
+
+            if (!string.IsNullOrWhiteSpace(message.IdempotencyKey))
+            {
+                properties.Headers["idempotency_key"] = message.IdempotencyKey;
+            }
 
             if (!string.IsNullOrWhiteSpace(message.TraceParent))
             {

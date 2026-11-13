@@ -22,9 +22,14 @@ public static class TelemetryExtensions
             .GetSection(TelemetryOptions.SectionName)
             .Get<TelemetryOptions>() ?? new TelemetryOptions();
 
+        string? envServiceName = configuration["OTEL_SERVICE_NAME"];
         string resolvedServiceName = !string.IsNullOrWhiteSpace(telemetryOptions.ServiceName) && telemetryOptions.ServiceName != "EventFlow"
             ? telemetryOptions.ServiceName
-            : defaultServiceName;
+            : (!string.IsNullOrWhiteSpace(envServiceName) ? envServiceName : defaultServiceName);
+
+        string? resolvedOtlpEndpoint = !string.IsNullOrWhiteSpace(telemetryOptions.OtlpEndpoint)
+            ? telemetryOptions.OtlpEndpoint
+            : configuration["OTEL_EXPORTER_OTLP_ENDPOINT"];
 
         var resourceBuilder = ResourceBuilder.CreateDefault()
             .AddService(
@@ -45,11 +50,11 @@ public static class TelemetryExtensions
                     tracing.AddConsoleExporter();
                 }
 
-                if (!string.IsNullOrWhiteSpace(telemetryOptions.OtlpEndpoint))
+                if (!string.IsNullOrWhiteSpace(resolvedOtlpEndpoint))
                 {
                     tracing.AddOtlpExporter(otlpOptions =>
                     {
-                        otlpOptions.Endpoint = new Uri(telemetryOptions.OtlpEndpoint);
+                        otlpOptions.Endpoint = new Uri(resolvedOtlpEndpoint);
                     });
                 }
             })
@@ -65,11 +70,11 @@ public static class TelemetryExtensions
                     metrics.AddConsoleExporter();
                 }
 
-                if (!string.IsNullOrWhiteSpace(telemetryOptions.OtlpEndpoint))
+                if (!string.IsNullOrWhiteSpace(resolvedOtlpEndpoint))
                 {
                     metrics.AddOtlpExporter(otlpOptions =>
                     {
-                        otlpOptions.Endpoint = new Uri(telemetryOptions.OtlpEndpoint);
+                        otlpOptions.Endpoint = new Uri(resolvedOtlpEndpoint);
                     });
                 }
             });

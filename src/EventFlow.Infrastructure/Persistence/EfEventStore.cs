@@ -35,6 +35,7 @@ public sealed class EfEventStore : IEventStore
         }
         catch (DbUpdateException ex) when (IsUniqueConstraintViolation(ex))
         {
+            _context.ChangeTracker.Clear();
             return Result.Failure(
                 DomainError.Conflict(
                     "Event.DuplicateIdempotencyKey",
@@ -42,6 +43,7 @@ public sealed class EfEventStore : IEventStore
         }
         catch (Exception ex)
         {
+            _context.ChangeTracker.Clear();
             return Result.Failure(
                 DomainError.Failure("Database.SaveFailure", $"Failed to save event and outbox message: {ex.Message}"));
         }

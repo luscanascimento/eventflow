@@ -1,6 +1,7 @@
 using System.Text;
 using EventFlow.Application.Events.Consumers;
 using EventFlow.Domain.Common;
+using EventFlow.Domain.Diagnostics;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using RabbitMQ.Client;
@@ -42,83 +43,117 @@ public sealed partial class RabbitMqConsumer : IRabbitMqConsumer
         await _startLock.WaitAsync(cancellationToken);
         try
         {
-            if (_channel != null && _consumerTag != null)
+            if (_channel is { IsOpen: true } && _consumerTag != null)
             {
                 return;
             }
 
+            if (_channel != null)
+            {
+                try
+                {
+                    await _channel.DisposeAsync();
+                }
+                catch
+                {
+                    // Ignore stale channel disposal failure
+                }
+
+                _channel = null;
+                _consumerTag = null;
+            }
+
             LogDeclaringTopology(_logger, _options.QueueName, _options.ExchangeName, _options.RoutingKeyPattern);
 
-            _channel = await _connection.CreateChannelAsync(cancellationToken);
-
-            // 1. Declare Dead Letter Exchange (DLX) & Dead Letter Queue (DLQ)
-            await _channel.ExchangeDeclareAsync(
-                exchange: _options.DlxExchangeName,
-                type: ExchangeType.Topic,
-                durable: true,
-                autoDelete: false,
-                arguments: null,
-                cancellationToken: cancellationToken);
-
-            await _channel.QueueDeclareAsync(
-                queue: _options.DlqQueueName,
-                durable: true,
-                exclusive: false,
-                autoDelete: false,
-                arguments: null,
-                cancellationToken: cancellationToken);
-
-            await _channel.QueueBindAsync(
-                queue: _options.DlqQueueName,
-                exchange: _options.DlxExchangeName,
-                routingKey: "#",
-                arguments: null,
-                cancellationToken: cancellationToken);
-
-            // 2. Declare Durable Processing Queue with Dead Letter routing
-            var queueArguments = new Dictionary<string, object?>
+            var channel = await _connection.CreateChannelAsync(cancellationToken);
+            try
             {
-                ["x-dead-letter-exchange"] = _options.DlxExchangeName
-            };
+                // 1. Declare Dead Letter Exchange (DLX) & Dead Letter Queue (DLQ)
+                await channel.ExchangeDeclareAsync(
+                    exchange: _options.DlxExchangeName,
+                    type: ExchangeType.Topic,
+                    durable: true,
+                    autoDelete: false,
+                    arguments: null,
+                    cancellationToken: cancellationToken);
 
-            await _channel.QueueDeclareAsync(
-                queue: _options.QueueName,
-                durable: true,
-                exclusive: false,
-                autoDelete: false,
-                arguments: queueArguments,
-                cancellationToken: cancellationToken);
+                await channel.QueueDeclareAsync(
+                    queue: _options.DlqQueueName,
+                    durable: true,
+                    exclusive: false,
+                    autoDelete: false,
+                    arguments: null,
+                    cancellationToken: cancellationToken);
 
-            // 2. Bind Queue to Topic Exchange
-            await _channel.QueueBindAsync(
-                queue: _options.QueueName,
-                exchange: _options.ExchangeName,
-                routingKey: _options.RoutingKeyPattern,
-                arguments: null,
-                cancellationToken: cancellationToken);
+                await channel.QueueBindAsync(
+                    queue: _options.DlqQueueName,
+                    exchange: _options.DlxExchangeName,
+                    routingKey: "#",
+                    arguments: null,
+                    cancellationToken: cancellationToken);
 
-            // 3. Set QoS Prefetch Count for backpressure control
-            await _channel.BasicQosAsync(
-                prefetchSize: 0,
-                prefetchCount: _options.PrefetchCount,
-                global: false,
-                cancellationToken: cancellationToken);
+                // 2. Declare Durable Processing Queue with Dead Letter routing
+                var queueArguments = new Dictionary<string, object?>
+                {
+                    ["x-dead-letter-exchange"] = _options.DlxExchangeName
+                };
 
-            // 4. Create Async Consumer
-            var consumer = new AsyncEventingBasicConsumer(_channel);
-            consumer.ReceivedAsync += async (sender, ea) =>
+                await channel.QueueDeclareAsync(
+                    queue: _options.QueueName,
+                    durable: true,
+                    exclusive: false,
+                    autoDelete: false,
+                    arguments: queueArguments,
+                    cancellationToken: cancellationToken);
+
+                // 3. Bind Queue to Topic Exchange
+                await channel.QueueBindAsync(
+                    queue: _options.QueueName,
+                    exchange: _options.ExchangeName,
+                    routingKey: _options.RoutingKeyPattern,
+                    arguments: null,
+                    cancellationToken: cancellationToken);
+
+                // 4. Set QoS Prefetch Count for backpressure control
+                await channel.BasicQosAsync(
+                    prefetchSize: 0,
+                    prefetchCount: _options.PrefetchCount,
+                    global: false,
+                    cancellationToken: cancellationToken);
+
+                _channel = channel;
+
+                // 5. Create Async Consumer
+                var consumer = new AsyncEventingBasicConsumer(channel);
+                consumer.ReceivedAsync += async (sender, ea) =>
+                {
+                    await HandleMessageAsync(ea, messageHandler, cancellationToken);
+                };
+
+                // 6. Start Consuming
+                _consumerTag = await channel.BasicConsumeAsync(
+                    queue: _options.QueueName,
+                    autoAck: false,
+                    consumer: consumer,
+                    cancellationToken: cancellationToken);
+
+                LogConsumerStarted(_logger, _options.QueueName, _consumerTag);
+            }
+            catch
             {
-                await HandleMessageAsync(ea, messageHandler, cancellationToken);
-            };
+                _channel = null;
+                _consumerTag = null;
+                try
+                {
+                    await channel.DisposeAsync();
+                }
+                catch
+                {
+                    // Ignore disposal errors during exception unwinding
+                }
 
-            // 5. Start Consuming
-            _consumerTag = await _channel.BasicConsumeAsync(
-                queue: _options.QueueName,
-                autoAck: false,
-                consumer: consumer,
-                cancellationToken: cancellationToken);
-
-            LogConsumerStarted(_logger, _options.QueueName, _consumerTag);
+                throw;
+            }
         }
         finally
         {
@@ -131,7 +166,8 @@ public sealed partial class RabbitMqConsumer : IRabbitMqConsumer
         Func<ConsumedEventContext, CancellationToken, Task<Result>> messageHandler,
         CancellationToken cancellationToken)
     {
-        if (_channel == null)
+        var channel = _channel;
+        if (channel == null)
         {
             return;
         }
@@ -177,21 +213,37 @@ public sealed partial class RabbitMqConsumer : IRabbitMqConsumer
 
             if (result.IsSuccess)
             {
-                await _channel.BasicAckAsync(
+                await channel.BasicAckAsync(
                     deliveryTag: ea.DeliveryTag,
                     multiple: false,
-                    cancellationToken: cancellationToken);
+                    cancellationToken: CancellationToken.None);
 
                 LogMessageAcknowledged(_logger, eventId, ea.DeliveryTag);
             }
+            else if (result.Error.Code == "Idempotency.ConflictInFlight" && !ea.Redelivered)
+            {
+                // Requeue once on transient in-flight concurrency conflict so another worker can finish
+                await channel.BasicNackAsync(
+                    deliveryTag: ea.DeliveryTag,
+                    multiple: false,
+                    requeue: true,
+                    cancellationToken: CancellationToken.None);
+
+                LogMessageRejected(_logger, eventId, ea.DeliveryTag, result.Error.Message);
+            }
             else
             {
-                // Reject message without requeue to avoid poison message loops
-                await _channel.BasicNackAsync(
+                // Reject message without requeue to route to Dead Letter Queue (DLQ)
+                await channel.BasicNackAsync(
                     deliveryTag: ea.DeliveryTag,
                     multiple: false,
                     requeue: false,
-                    cancellationToken: cancellationToken);
+                    cancellationToken: CancellationToken.None);
+
+                EventFlowDiagnostics.DlqMessages.Add(
+                    1,
+                    new KeyValuePair<string, object?>("source", "consumer"),
+                    new KeyValuePair<string, object?>("event_type", resolvedEventType));
 
                 LogMessageRejected(_logger, eventId, ea.DeliveryTag, result.Error.Message);
             }
@@ -202,11 +254,16 @@ public sealed partial class RabbitMqConsumer : IRabbitMqConsumer
 
             try
             {
-                await _channel.BasicNackAsync(
+                await channel.BasicNackAsync(
                     deliveryTag: ea.DeliveryTag,
                     multiple: false,
                     requeue: false,
-                    cancellationToken: cancellationToken);
+                    cancellationToken: CancellationToken.None);
+
+                EventFlowDiagnostics.DlqMessages.Add(
+                    1,
+                    new KeyValuePair<string, object?>("source", "consumer"),
+                    new KeyValuePair<string, object?>("event_type", resolvedEventType));
             }
             catch (Exception nackEx)
             {

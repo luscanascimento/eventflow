@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Text;
 using EventFlow.Application.Abstractions;
 using EventFlow.Domain.Common;
+using EventFlow.Domain.Diagnostics;
 using EventFlow.Infrastructure.Security;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -42,10 +43,18 @@ public sealed partial class HttpExternalDispatcher : IExternalDispatcher
 
         string sanitizedUrl = SsrfGuard.SanitizeUrlForLogging(request.TargetUrl);
 
+        using var activity = EventFlowDiagnostics.ActivitySource.StartActivity(
+            "EventFlow.HttpExternalDispatch",
+            ActivityKind.Client);
+
+        activity?.SetTag("http.request.method", request.Method.Method);
+        activity?.SetTag("url.full", sanitizedUrl);
+
         // SSRF Defense: validate URI scheme and safety against private/cloud metadata ranges
         if (!SsrfGuard.IsSafeTarget(request.TargetUrl, _ssrfOptions))
         {
             LogInvalidUriScheme(_logger, sanitizedUrl);
+            activity?.SetStatus(ActivityStatusCode.Error, "BlockedBySsrfGuard");
             return Result.Failure<ExternalDispatchResponse>(
                 DomainError.Validation("ExternalDispatcher.BlockedTarget", "Target URL is blocked by security and SSRF defense policies."));
         }
@@ -56,16 +65,20 @@ public sealed partial class HttpExternalDispatcher : IExternalDispatcher
 
         try
         {
-            var response = await _pipeline.ExecuteAsync(async ct =>
+            using var response = await _pipeline.ExecuteAsync(async ct =>
             {
                 using var requestMessage = new HttpRequestMessage(request.Method, request.TargetUrl)
                 {
                     Content = new StringContent(request.Payload, Encoding.UTF8, "application/json")
                 };
 
-                if (!string.IsNullOrWhiteSpace(request.TraceParent))
+                string? traceParent = !string.IsNullOrWhiteSpace(request.TraceParent)
+                    ? request.TraceParent
+                    : activity?.Id;
+
+                if (!string.IsNullOrWhiteSpace(traceParent))
                 {
-                    requestMessage.Headers.TryAddWithoutValidation("traceparent", request.TraceParent);
+                    requestMessage.Headers.TryAddWithoutValidation("traceparent", traceParent);
                 }
 
                 if (request.Headers != null)
@@ -80,18 +93,30 @@ public sealed partial class HttpExternalDispatcher : IExternalDispatcher
             }, cancellationToken);
 
             stopwatch.Stop();
+            int statusCode = (int)response.StatusCode;
+            activity?.SetTag("http.response.status_code", statusCode);
+
             string responseBody = await response.Content.ReadAsStringAsync(cancellationToken);
 
-            LogDispatchCompleted(_logger, (int)response.StatusCode, stopwatch.ElapsedMilliseconds);
+            LogDispatchCompleted(_logger, statusCode, stopwatch.ElapsedMilliseconds);
 
+            if (!response.IsSuccessStatusCode)
+            {
+                activity?.SetStatus(ActivityStatusCode.Error, $"HTTP {statusCode}");
+                return Result.Failure<ExternalDispatchResponse>(
+                    DomainError.Failure("Resilience.HttpError", $"Downstream endpoint returned non-success HTTP status {statusCode}."));
+            }
+
+            activity?.SetStatus(ActivityStatusCode.Ok);
             return Result.Success(new ExternalDispatchResponse(
-                StatusCode: (int)response.StatusCode,
+                StatusCode: statusCode,
                 ResponseBody: responseBody,
                 Elapsed: stopwatch.Elapsed));
         }
         catch (BrokenCircuitException ex)
         {
             stopwatch.Stop();
+            activity?.SetStatus(ActivityStatusCode.Error, "CircuitBreakerOpen");
             LogCircuitBroken(_logger, sanitizedUrl, ex);
             return Result.Failure<ExternalDispatchResponse>(
                 DomainError.Failure("Resilience.CircuitBreakerOpen", "Downstream service circuit breaker is open. Request short-circuited."));
@@ -99,6 +124,7 @@ public sealed partial class HttpExternalDispatcher : IExternalDispatcher
         catch (TimeoutRejectedException ex)
         {
             stopwatch.Stop();
+            activity?.SetStatus(ActivityStatusCode.Error, "Timeout");
             LogTimeout(_logger, sanitizedUrl, stopwatch.ElapsedMilliseconds, ex);
             return Result.Failure<ExternalDispatchResponse>(
                 DomainError.Failure("Resilience.Timeout", "The external dispatch operation timed out."));
@@ -106,6 +132,7 @@ public sealed partial class HttpExternalDispatcher : IExternalDispatcher
         catch (HttpRequestException ex)
         {
             stopwatch.Stop();
+            activity?.SetStatus(ActivityStatusCode.Error, ex.Message);
             LogNetworkError(_logger, sanitizedUrl, ex);
             return Result.Failure<ExternalDispatchResponse>(
                 DomainError.Failure("Resilience.NetworkError", $"Network error during dispatch: {ex.Message}"));
@@ -113,6 +140,7 @@ public sealed partial class HttpExternalDispatcher : IExternalDispatcher
         catch (Exception ex)
         {
             stopwatch.Stop();
+            activity?.SetStatus(ActivityStatusCode.Error, ex.Message);
             LogUnhandledError(_logger, sanitizedUrl, ex);
             return Result.Failure<ExternalDispatchResponse>(
                 DomainError.Failure("Resilience.UnhandledError", $"Unexpected error during dispatch: {ex.Message}"));

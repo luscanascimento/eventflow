@@ -26,12 +26,16 @@ public sealed class EfOutboxStore : IOutboxStore
         CancellationToken cancellationToken = default)
     {
         DateTimeOffset lockedUntilUtc = now.Add(leaseDuration);
+        List<OutboxMessage> claimedMessages;
 
         if (_context.Database.IsNpgsql())
         {
+            // Clear tracked entities so FromSqlInterpolated materializes the fresh RETURNING columns from PostgreSQL
+            _context.ChangeTracker.Clear();
+
             // PostgreSQL atomic claim query: locks rows with SKIP LOCKED, updates status and lease token,
             // and returns the claimed rows without requiring long-lived open transactions.
-            return await _context.OutboxMessages
+            claimedMessages = await _context.OutboxMessages
                 .FromSqlInterpolated($@"
                     WITH pending_batch AS (
                         SELECT id FROM outbox_messages
@@ -50,30 +54,50 @@ public sealed class EfOutboxStore : IOutboxStore
                     RETURNING m.id, m.event_id, m.tenant_id, m.event_type, m.routing_key, m.payload, m.trace_parent, m.status, m.lock_token, m.locked_until_utc, m.created_at, m.processed_at, m.next_retry_at, m.retry_count, m.last_error")
                 .ToListAsync(cancellationToken);
         }
-
-        // Fallback for non-PostgreSQL providers (e.g. SQLite in unit / integration tests)
-        var allPendingOrProcessing = await _context.OutboxMessages
-            .Where(o => o.Status == OutboxStatus.Pending || o.Status == OutboxStatus.Processing)
-            .ToListAsync(cancellationToken);
-
-        var eligible = allPendingOrProcessing
-            .Where(o => (o.Status == OutboxStatus.Pending && (o.NextRetryAt == null || o.NextRetryAt <= now))
-                     || (o.Status == OutboxStatus.Processing && o.LockedUntilUtc != null && o.LockedUntilUtc < now))
-            .OrderBy(o => o.CreatedAt)
-            .Take(batchSize)
-            .ToList();
-
-        foreach (var message in eligible)
+        else
         {
-            message.Claim(lockToken, lockedUntilUtc);
+            // Fallback for non-PostgreSQL providers (e.g. SQLite in unit / integration tests)
+            var allPendingOrProcessing = await _context.OutboxMessages
+                .Where(o => o.Status == OutboxStatus.Pending || o.Status == OutboxStatus.Processing)
+                .ToListAsync(cancellationToken);
+
+            claimedMessages = allPendingOrProcessing
+                .Where(o => (o.Status == OutboxStatus.Pending && (o.NextRetryAt == null || o.NextRetryAt <= now))
+                         || (o.Status == OutboxStatus.Processing && o.LockedUntilUtc != null && o.LockedUntilUtc < now))
+                .OrderBy(o => o.CreatedAt)
+                .Take(batchSize)
+                .ToList();
+
+            foreach (var message in claimedMessages)
+            {
+                message.Claim(lockToken, lockedUntilUtc);
+            }
+
+            if (claimedMessages.Count > 0)
+            {
+                await _context.SaveChangesAsync(cancellationToken);
+            }
         }
 
-        if (eligible.Count > 0)
+        if (claimedMessages.Count > 0)
         {
-            await _context.SaveChangesAsync(cancellationToken);
+            var eventIds = claimedMessages.Select(m => m.EventId).Distinct().ToList();
+            var eventMetadata = await _context.Events
+                .AsNoTracking()
+                .Where(e => eventIds.Contains(e.EventId))
+                .Select(e => new { e.EventId, e.IdempotencyKey, e.CorrelationId, e.Version })
+                .ToDictionaryAsync(e => e.EventId, cancellationToken);
+
+            foreach (var message in claimedMessages)
+            {
+                if (eventMetadata.TryGetValue(message.EventId, out var meta))
+                {
+                    message.EnrichEnvelopeMetadata(meta.IdempotencyKey, meta.CorrelationId, meta.Version);
+                }
+            }
         }
 
-        return eligible;
+        return claimedMessages;
     }
 
     public async Task<IReadOnlyList<OutboxMessage>> FetchPendingBatchAsync(
@@ -103,8 +127,16 @@ public sealed class EfOutboxStore : IOutboxStore
             return result;
         }
 
-        await _context.SaveChangesAsync(cancellationToken);
-        return Result.Success();
+        try
+        {
+            await _context.SaveChangesAsync(cancellationToken);
+            return Result.Success();
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            _context.ChangeTracker.Clear();
+            return Result.Failure(DomainError.Conflict("OutboxMessage.LockTokenMismatch", "Lock token mismatch; lease was lost to another worker."));
+        }
     }
 
     public async Task<Result> MarkFailedAsync(
@@ -128,8 +160,16 @@ public sealed class EfOutboxStore : IOutboxStore
             return result;
         }
 
-        await _context.SaveChangesAsync(cancellationToken);
-        return Result.Success();
+        try
+        {
+            await _context.SaveChangesAsync(cancellationToken);
+            return Result.Success();
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            _context.ChangeTracker.Clear();
+            return Result.Failure(DomainError.Conflict("OutboxMessage.LockTokenMismatch", "Lock token mismatch; lease was lost to another worker."));
+        }
     }
 
     public async Task SaveChangesAsync(CancellationToken cancellationToken = default)

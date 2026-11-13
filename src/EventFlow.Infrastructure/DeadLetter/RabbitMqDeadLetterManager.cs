@@ -62,6 +62,8 @@ public sealed partial class RabbitMqDeadLetterManager : IDeadLetterManager
                 string? exceptionMsg = AmqpHeaderParser.GetString(headers, "x-exception-message");
                 string? exceptionType = AmqpHeaderParser.GetString(headers, "x-exception-type");
 
+                var (deathRetryCount, deathReason, deathFailedAt) = ExtractXDeathMetadata(headers);
+
                 var allHeaders = AmqpHeaderParser.ExtractAll(headers);
 
                 messages.Add(new DeadLetterMessage(
@@ -71,21 +73,21 @@ public sealed partial class RabbitMqDeadLetterManager : IDeadLetterManager
                     TenantId: tenantId,
                     EventType: eventType,
                     TraceParent: traceParent,
-                    ExceptionMessage: exceptionMsg,
+                    ExceptionMessage: exceptionMsg ?? deathReason,
                     ExceptionType: exceptionType,
-                    FailedAt: DateTimeOffset.UtcNow,
-                    RetryCount: 0,
+                    FailedAt: deathFailedAt ?? DateTimeOffset.UtcNow,
+                    RetryCount: deathRetryCount,
                     Headers: allHeaders));
             }
         }
         finally
         {
-            // Re-queue peeked messages so they stay intact in the DLQ
+            // Re-queue peeked messages with CancellationToken.None so they stay intact in the DLQ even on request abort
             foreach (ulong tag in deliveryTagsToRequeue)
             {
                 try
                 {
-                    await channel.BasicNackAsync(tag, multiple: false, requeue: true, cancellationToken);
+                    await channel.BasicNackAsync(tag, multiple: false, requeue: true, CancellationToken.None);
                 }
                 catch (Exception ex)
                 {
@@ -141,15 +143,15 @@ public sealed partial class RabbitMqDeadLetterManager : IDeadLetterManager
                     body: result.Body,
                     cancellationToken: cancellationToken);
 
-                // Acknowledge and remove from DLQ upon successful replay
-                await channel.BasicAckAsync(result.DeliveryTag, multiple: false, cancellationToken);
+                // Acknowledge and remove from DLQ upon successful confirmed replay
+                await channel.BasicAckAsync(result.DeliveryTag, multiple: false, CancellationToken.None);
                 replayedCount++;
             }
             catch (Exception ex)
             {
                 LogReplayError(_logger, result.DeliveryTag, ex);
                 // NACK with requeue so the message isn't lost on publish failure
-                await channel.BasicNackAsync(result.DeliveryTag, multiple: false, requeue: true, cancellationToken);
+                await channel.BasicNackAsync(result.DeliveryTag, multiple: false, requeue: true, CancellationToken.None);
                 return Result.Failure<int>(DomainError.Failure("DLQ.ReplayFailed", $"Failed during message replay: {ex.Message}"));
             }
         }
@@ -183,6 +185,42 @@ public sealed partial class RabbitMqDeadLetterManager : IDeadLetterManager
             LogPurgeError(_logger, _options.DlqQueueName, ex);
             return Result.Failure<uint>(DomainError.Failure("DLQ.PurgeFailed", ex.Message));
         }
+    }
+
+    private static (int RetryCount, string? Reason, DateTimeOffset? FailedAt) ExtractXDeathMetadata(IDictionary<string, object?>? headers)
+    {
+        if (headers == null || !headers.TryGetValue("x-death", out var xDeathObj) || xDeathObj is not IEnumerable<object> xDeathList)
+        {
+            return (0, null, null);
+        }
+
+        var firstEntry = xDeathList.OfType<IDictionary<string, object?>>().FirstOrDefault()
+            ?? xDeathList.OfType<IDictionary<string, object>>().Select(d => d.ToDictionary(k => k.Key, v => (object?)v.Value)).FirstOrDefault();
+
+        if (firstEntry == null)
+        {
+            return (0, null, null);
+        }
+
+        int retryCount = 0;
+        if (firstEntry.TryGetValue("count", out var countVal) && countVal != null)
+        {
+            retryCount = Convert.ToInt32(countVal, System.Globalization.CultureInfo.InvariantCulture);
+        }
+
+        string? reason = AmqpHeaderParser.GetString(firstEntry, "reason");
+        if (!string.IsNullOrWhiteSpace(reason))
+        {
+            reason = $"Dead-lettered by broker (reason: {reason})";
+        }
+
+        DateTimeOffset? failedAt = null;
+        if (firstEntry.TryGetValue("time", out var timeVal) && timeVal is AmqpTimestamp amqpTimestamp)
+        {
+            failedAt = DateTimeOffset.FromUnixTimeSeconds(amqpTimestamp.UnixTime);
+        }
+
+        return (retryCount, reason, failedAt);
     }
 
     [LoggerMessage(EventId = 9301, Level = LogLevel.Information, Message = "Peeked {Count} messages from DLQ '{QueueName}'")]
