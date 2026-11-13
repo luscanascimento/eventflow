@@ -15,6 +15,10 @@ public static class HealthEndpoints
     {
         var group = endpoints.MapGroup("/health").WithTags("Health");
 
+        group.MapGet("/", () => Results.Ok(new { status = "Healthy" }))
+            .WithName("HealthCheck")
+            .WithSummary("Basic health check endpoint.");
+
         group.MapGet("/live", () => Results.Ok(new { status = "Healthy" }))
             .WithName("LivenessCheck")
             .WithSummary("Liveness probe verifying the service process is alive.");
@@ -60,7 +64,15 @@ public static class HealthEndpoints
                 try
                 {
                     var db = redisConnection?.GetDatabase();
-                    redisOk = db != null && (redisConnection?.IsConnected == true);
+                    if (db != null && (redisConnection?.IsConnected == true))
+                    {
+                        await db.PingAsync();
+                        redisOk = true;
+                    }
+                    else
+                    {
+                        redisOk = false;
+                    }
                 }
                 catch
                 {

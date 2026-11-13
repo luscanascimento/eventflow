@@ -15,15 +15,33 @@ public static class EventEndpoints
             .AddEndpointFilter<ApiKeyEndpointFilter>();
 
         group.MapPost("/", async (
-            [FromBody] IngestEventCommand command,
+            [FromBody] IngestEventCommand? command,
             [FromServices] IngestEventUseCase useCase,
             HttpContext httpContext,
             CancellationToken cancellationToken) =>
         {
+            if (command is null)
+            {
+                return Results.Problem(
+                    statusCode: StatusCodes.Status400BadRequest,
+                    title: "Invalid Request Body",
+                    detail: "Request body cannot be null or empty.",
+                    instance: httpContext.Request.Path);
+            }
+
+            if (httpContext.Request.Headers["X-Tenant-Id"].Count > 1)
+            {
+                return Results.Problem(
+                    statusCode: StatusCodes.Status400BadRequest,
+                    title: "Ambiguous Tenant Header",
+                    detail: "Multiple 'X-Tenant-Id' headers are not permitted.",
+                    instance: httpContext.Request.Path);
+            }
+
             // Validate X-Tenant-Id header against payload tenant if header is present
             string? headerTenant = httpContext.Request.Headers["X-Tenant-Id"].FirstOrDefault();
             if (!string.IsNullOrWhiteSpace(headerTenant) &&
-                !string.Equals(headerTenant.Trim(), command?.TenantId?.Trim(), StringComparison.Ordinal))
+                !string.Equals(headerTenant.Trim(), command.TenantId?.Trim(), StringComparison.Ordinal))
             {
                 return Results.Problem(
                     statusCode: StatusCodes.Status400BadRequest,
@@ -32,7 +50,7 @@ public static class EventEndpoints
                     instance: httpContext.Request.Path);
             }
 
-            var result = await useCase.ExecuteAsync(command!, cancellationToken);
+            var result = await useCase.ExecuteAsync(command, cancellationToken);
 
             if (result.IsSuccess)
             {

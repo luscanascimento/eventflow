@@ -91,6 +91,8 @@ services:
       Security__ApiKey: ${API_KEY:?Variable API_KEY must be set in .env file}
       OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
       OTEL_SERVICE_NAME: EventFlow.Api
+      OpenTelemetry__OtlpEndpoint: http://jaeger:4317
+      OpenTelemetry__ServiceName: EventFlow.Api
     ports:
       - "${API_PORT:-8080}:8080"
     depends_on:
@@ -122,6 +124,8 @@ services:
       Redis__Enabled: "true"
       OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
       OTEL_SERVICE_NAME: EventFlow.Worker
+      OpenTelemetry__OtlpEndpoint: http://jaeger:4317
+      OpenTelemetry__ServiceName: EventFlow.Worker
     depends_on:
       postgres:
         condition: service_healthy

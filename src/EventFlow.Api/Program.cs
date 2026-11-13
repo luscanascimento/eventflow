@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Threading.RateLimiting;
 using EventFlow.Api.Endpoints;
 using EventFlow.Api.Middleware;
@@ -10,9 +11,10 @@ using Microsoft.AspNetCore.RateLimiting;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// 1. Configure Kestrel limits defensively (Max 256 KB payload to mitigate memory exhaustion DoS)
+// 1. Configure Kestrel limits defensively (Max 256 KB payload to mitigate memory exhaustion DoS, strip Server header)
 builder.WebHost.ConfigureKestrel(options =>
 {
+    options.AddServerHeader = false;
     options.Limits.MaxRequestBodySize = 256 * 1024;
 });
 
@@ -35,12 +37,22 @@ builder.Services.AddOptions<SecurityOptions>()
     }, "Security:ApiKey must be configured and at least 16 characters long in Production environments.")
     .ValidateOnStart();
 
-// 4. Security: Defensive Rate Limiting (Partitioned by Client IP and Tenant ID)
+// 4. Security: Defensive Rate Limiting (Partitioned by Client IP and validated Tenant ID)
 builder.Services.AddRateLimiter(options =>
 {
     options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
     options.OnRejected = async (context, token) =>
     {
+        if (context.Lease.TryGetMetadata(MetadataName.RetryAfter, out var retryAfter))
+        {
+            context.HttpContext.Response.Headers.RetryAfter =
+                ((int)Math.Ceiling(retryAfter.TotalSeconds)).ToString(CultureInfo.InvariantCulture);
+        }
+        else
+        {
+            context.HttpContext.Response.Headers.RetryAfter = "60";
+        }
+
         context.HttpContext.Response.ContentType = "application/problem+json";
         var problemDetails = new ProblemDetails
         {
@@ -55,10 +67,12 @@ builder.Services.AddRateLimiter(options =>
     options.AddPolicy("events-rate-limit", httpContext =>
     {
         string ip = httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown_ip";
-        string? tenantHeader = httpContext.Request.Headers["X-Tenant-Id"].FirstOrDefault();
-        string partitionKey = string.IsNullOrWhiteSpace(tenantHeader)
-            ? ip
-            : $"{ip}:{tenantHeader.Trim()}";
+        string? tenantHeader = httpContext.Request.Headers["X-Tenant-Id"].FirstOrDefault()?.Trim();
+        string partitionKey = !string.IsNullOrWhiteSpace(tenantHeader) &&
+                              tenantHeader.Length is >= 3 and <= 64 &&
+                              tenantHeader.All(c => char.IsLetterOrDigit(c) || c is '_' or '-')
+            ? $"{ip}:{tenantHeader}"
+            : ip;
 
         return RateLimitPartition.GetSlidingWindowLimiter(
             partitionKey,
@@ -83,16 +97,21 @@ builder.Services.AddEventFlowTelemetry(builder.Configuration, "EventFlow.Api");
 
 var app = builder.Build();
 
-// 7. Security Headers & Exception Handling Pipeline
-app.UseExceptionHandler();
+// 7. Security Headers & Exception Handling Pipeline (SecurityHeaders outermost so 500 errors also include OWASP headers)
 app.UseMiddleware<SecurityHeadersMiddleware>();
+app.UseExceptionHandler();
 
 if (app.Environment.IsDevelopment())
 {
     app.MapOpenApi();
 }
 
-app.UseHttpsRedirection();
+if (!string.IsNullOrWhiteSpace(app.Configuration["ASPNETCORE_HTTPS_PORT"]) ||
+    (app.Configuration["ASPNETCORE_URLS"]?.Contains("https://", StringComparison.OrdinalIgnoreCase) == true))
+{
+    app.UseHttpsRedirection();
+}
+
 app.UseRateLimiter();
 
 // 8. Map Endpoints

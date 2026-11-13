@@ -8,6 +8,8 @@ namespace EventFlow.Api.Endpoints;
 
 public static class DeadLetterEndpoints
 {
+    private const int MaxBatchLimit = 100;
+
     public static IEndpointRouteBuilder MapDeadLetterEndpoints(this IEndpointRouteBuilder app)
     {
         var group = app.MapGroup("/api/v1/dlq")
@@ -18,8 +20,18 @@ public static class DeadLetterEndpoints
         group.MapGet("/", async (
             int? count,
             IDeadLetterManager dlqManager,
+            HttpContext httpContext,
             CancellationToken cancellationToken) =>
         {
+            if (count.HasValue && (count.Value <= 0 || count.Value > MaxBatchLimit))
+            {
+                return Results.Problem(
+                    statusCode: StatusCodes.Status400BadRequest,
+                    title: "Invalid Count Parameter",
+                    detail: $"The 'count' query parameter must be between 1 and {MaxBatchLimit}.",
+                    instance: httpContext.Request.Path);
+            }
+
             int peekCount = count.GetValueOrDefault(10);
             var messages = await dlqManager.PeekMessagesAsync(peekCount, cancellationToken);
             return Results.Ok(new
@@ -34,8 +46,18 @@ public static class DeadLetterEndpoints
         group.MapPost("/replay", async (
             int? maxCount,
             IDeadLetterManager dlqManager,
+            HttpContext httpContext,
             CancellationToken cancellationToken) =>
         {
+            if (maxCount.HasValue && (maxCount.Value <= 0 || maxCount.Value > MaxBatchLimit))
+            {
+                return Results.Problem(
+                    statusCode: StatusCodes.Status400BadRequest,
+                    title: "Invalid MaxCount Parameter",
+                    detail: $"The 'maxCount' query parameter must be between 1 and {MaxBatchLimit}.",
+                    instance: httpContext.Request.Path);
+            }
+
             int batch = maxCount.GetValueOrDefault(50);
             var result = await dlqManager.ReplayMessagesAsync(batch, cancellationToken);
 

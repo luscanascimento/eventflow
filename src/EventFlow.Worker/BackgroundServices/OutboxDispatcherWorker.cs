@@ -34,12 +34,14 @@ public sealed partial class OutboxDispatcherWorker : BackgroundService
 
         while (!stoppingToken.IsCancellationRequested)
         {
+            int processedCount = 0;
+
             try
             {
                 await using (var scope = _scopeFactory.CreateAsyncScope())
                 {
                     var processor = scope.ServiceProvider.GetRequiredService<OutboxProcessor>();
-                    int processedCount = await processor.ProcessPendingMessagesAsync(stoppingToken);
+                    processedCount = await processor.ProcessPendingMessagesAsync(stoppingToken);
 
                     if (processedCount > 0)
                     {
@@ -55,6 +57,12 @@ public sealed partial class OutboxDispatcherWorker : BackgroundService
             catch (Exception ex)
             {
                 LogWorkerIterationError(_logger, ex);
+            }
+
+            // If a full batch was processed, immediately poll for remaining pending messages without waiting
+            if (processedCount >= _options.BatchSize)
+            {
+                continue;
             }
 
             try

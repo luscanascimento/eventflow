@@ -16,8 +16,19 @@ public sealed class SecurityHeadersMiddleware
 
     public async Task InvokeAsync(HttpContext context)
     {
-        var headers = context.Response.Headers;
+        ApplyHeaders(context.Response.Headers);
 
+        context.Response.OnStarting(() =>
+        {
+            ApplyHeaders(context.Response.Headers);
+            return Task.CompletedTask;
+        });
+
+        await _next(context);
+    }
+
+    private static void ApplyHeaders(IHeaderDictionary headers)
+    {
         // 1. Prevent MIME-sniffing
         headers["X-Content-Type-Options"] = "nosniff";
 
@@ -42,7 +53,5 @@ public sealed class SecurityHeadersMiddleware
         // 8. Strip server identification headers
         headers.Remove("Server");
         headers.Remove("X-Powered-By");
-
-        await _next(context);
     }
 }
