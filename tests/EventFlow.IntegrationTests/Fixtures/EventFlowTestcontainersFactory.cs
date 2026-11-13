@@ -15,15 +15,19 @@ namespace EventFlow.IntegrationTests.Fixtures;
 /// </summary>
 public sealed class EventFlowTestcontainersFactory : WebApplicationFactory<Program>, IAsyncLifetime
 {
+    private readonly bool _ownsFixture;
+
     public DockerTestcontainersFixture ContainersFixture { get; }
 
     public EventFlowTestcontainersFactory(DockerTestcontainersFixture containersFixture)
     {
         ContainersFixture = containersFixture;
+        _ownsFixture = false;
     }
 
     public EventFlowTestcontainersFactory() : this(new DockerTestcontainersFixture())
     {
+        _ownsFixture = true;
     }
 
     protected override void ConfigureWebHost(IWebHostBuilder builder)
@@ -66,6 +70,9 @@ public sealed class EventFlowTestcontainersFactory : WebApplicationFactory<Progr
     public new async Task DisposeAsync()
     {
         await base.DisposeAsync();
-        await ContainersFixture.DisposeAsync();
+        if (_ownsFixture)
+        {
+            await ContainersFixture.DisposeAsync();
+        }
     }
 }

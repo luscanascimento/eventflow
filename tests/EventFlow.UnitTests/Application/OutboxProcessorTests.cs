@@ -112,22 +112,34 @@ public class OutboxProcessorTests
     public async Task ProcessPendingMessagesAsync_WhenPublishReachesMaxRetries_ShouldTransitionToDeadLettered()
     {
         var message = CreateSampleOutboxMessage();
+        var now = _dateTimeProvider.UtcNow;
+
+        // Pre-advance message to retry 2 of 3 so next failure reaches MaxRetries (3)
+        message.MarkFailed("Transient error 1", _options.MaxRetries, TimeSpan.FromSeconds(2), now);
+        message.MarkFailed("Transient error 2", _options.MaxRetries, TimeSpan.FromSeconds(4), now);
+
         _outboxStore.ClaimPendingBatchAsync(_options.BatchSize, Arg.Any<string>(), Arg.Any<TimeSpan>(), _dateTimeProvider.UtcNow, Arg.Any<CancellationToken>())
             .Returns(new[] { message });
         _publisher.PublishAsync(message, Arg.Any<CancellationToken>())
             .Returns(Result.Failure(DomainError.Failure("Broker.FatalError", "Poison message format")));
         _outboxStore.MarkFailedAsync(message.Id, Arg.Any<string>(), "Poison message format", _options.MaxRetries, Arg.Any<TimeSpan>(), _dateTimeProvider.UtcNow, Arg.Any<CancellationToken>())
-            .Returns(Result.Success());
+            .Returns(callInfo =>
+            {
+                message.MarkFailed("Poison message format", _options.MaxRetries, TimeSpan.FromSeconds(8), _dateTimeProvider.UtcNow);
+                return Result.Success();
+            });
 
         int processed = await _sut.ProcessPendingMessagesAsync();
 
         processed.Should().Be(1);
+        message.Status.Should().Be(OutboxStatus.DeadLettered);
+        message.RetryCount.Should().Be(_options.MaxRetries);
         await _outboxStore.Received(1).MarkFailedAsync(
             message.Id,
             Arg.Any<string>(),
             "Poison message format",
             _options.MaxRetries,
-            Arg.Any<TimeSpan>(),
+            TimeSpan.FromSeconds(8),
             _dateTimeProvider.UtcNow,
             Arg.Any<CancellationToken>());
     }

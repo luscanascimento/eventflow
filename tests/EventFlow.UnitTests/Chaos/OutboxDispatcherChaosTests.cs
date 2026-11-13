@@ -151,24 +151,37 @@ public sealed class OutboxDispatcherChaosTests
         _outboxStore.ClaimPendingBatchAsync(_options.BatchSize, Arg.Any<string>(), Arg.Any<TimeSpan>(), Arg.Any<DateTimeOffset>(), Arg.Any<CancellationToken>())
             .Returns(new[] { message });
         _outboxStore.MarkFailedAsync(Arg.Any<Guid>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<int>(), Arg.Any<TimeSpan>(), Arg.Any<DateTimeOffset>(), Arg.Any<CancellationToken>())
-            .Returns(Result.Success());
+            .Returns(callInfo =>
+            {
+                string err = callInfo.ArgAt<string>(2);
+                int maxRetries = callInfo.ArgAt<int>(3);
+                TimeSpan backoff = callInfo.ArgAt<TimeSpan>(4);
+                DateTimeOffset now = callInfo.ArgAt<DateTimeOffset>(5);
+                return message.MarkFailed(err, maxRetries, backoff, now);
+            });
 
         _publisher.PublishAsync(message, Arg.Any<CancellationToken>())
             .Returns(Result.Failure(DomainError.Failure("RabbitMQ.Unavailable", "Broker unreachable")));
 
-        // Step 1: Initial Attempt
+        // Step 1: Initial Attempt (RetryCount: 0 -> 1, backoff 2s)
         int processed1 = await _sut.ProcessPendingMessagesAsync();
         processed1.Should().Be(1);
+        message.Status.Should().Be(OutboxStatus.Pending);
+        message.RetryCount.Should().Be(1);
 
-        // Step 2: Second Attempt
+        // Step 2: Second Attempt (RetryCount: 1 -> 2, backoff 4s)
         _dateTimeProvider.UtcNow.Returns(_dateTimeProvider.UtcNow.AddSeconds(2));
         int processed2 = await _sut.ProcessPendingMessagesAsync();
         processed2.Should().Be(1);
+        message.Status.Should().Be(OutboxStatus.Pending);
+        message.RetryCount.Should().Be(2);
 
-        // Step 3: Third Attempt
+        // Step 3: Third Attempt (RetryCount: 2 -> 3 == MaxRetries, transitions to DeadLettered)
         _dateTimeProvider.UtcNow.Returns(_dateTimeProvider.UtcNow.AddSeconds(4));
         int processed3 = await _sut.ProcessPendingMessagesAsync();
         processed3.Should().Be(1);
+        message.Status.Should().Be(OutboxStatus.DeadLettered);
+        message.RetryCount.Should().Be(_options.MaxRetries);
 
         await _outboxStore.Received(3).MarkFailedAsync(
             message.Id,

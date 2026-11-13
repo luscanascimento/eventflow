@@ -51,22 +51,42 @@ public sealed class HealthEndpointsIntegrationTests : IClassFixture<EventFlowApi
     }
 
     [Fact]
-    public async Task GetReadiness_WhenBrokerUnhealthy_Returns503ServiceUnavailable()
+    public async Task GetHealth_Returns200Ok_WithHealthyStatus()
     {
-        // Arrange
-        _factory.RabbitMqConnectionMock.IsConnected.Returns(false);
-        _factory.RabbitMqConnectionMock.CreateChannelAsync(Arg.Any<CancellationToken>())
-            .Returns(Task.FromException<RabbitMQ.Client.IChannel>(new InvalidOperationException("Broker unreachable")));
-
         // Act
-        var response = await _client.GetAsync("/health/ready");
+        var response = await _client.GetAsync("/health");
 
         // Assert
-        response.StatusCode.Should().Be(HttpStatusCode.ServiceUnavailable);
-        var body = await response.Content.ReadFromJsonAsync<ReadinessResponse>();
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+        var body = await response.Content.ReadFromJsonAsync<HealthStatusResponse>();
         body.Should().NotBeNull();
-        body!.Status.Should().Be("Unhealthy");
-        body.Dependencies.Broker.Should().Be("Unhealthy");
+        body!.Status.Should().Be("Healthy");
+    }
+
+    [Fact]
+    public async Task GetReadiness_WhenBrokerUnhealthy_Returns503ServiceUnavailable()
+    {
+        try
+        {
+            // Arrange
+            _factory.RabbitMqConnectionMock.IsConnected.Returns(false);
+            _factory.RabbitMqConnectionMock.CreateChannelAsync(Arg.Any<CancellationToken>())
+                .Returns(Task.FromException<RabbitMQ.Client.IChannel>(new InvalidOperationException("Broker unreachable")));
+
+            // Act
+            var response = await _client.GetAsync("/health/ready");
+
+            // Assert
+            response.StatusCode.Should().Be(HttpStatusCode.ServiceUnavailable);
+            var body = await response.Content.ReadFromJsonAsync<ReadinessResponse>();
+            body.Should().NotBeNull();
+            body!.Status.Should().Be("Unhealthy");
+            body.Dependencies.Broker.Should().Be("Unhealthy");
+        }
+        finally
+        {
+            _factory.RabbitMqConnectionMock.IsConnected.Returns(true);
+        }
     }
 
     private sealed record HealthStatusResponse(

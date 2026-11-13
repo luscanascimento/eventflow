@@ -121,6 +121,30 @@ public sealed class HttpExternalDispatcherTests : IDisposable
         result.Error.Message.Should().Contain("Connection refused");
     }
 
+    [Theory]
+    [InlineData(HttpStatusCode.InternalServerError)]
+    [InlineData(HttpStatusCode.BadGateway)]
+    [InlineData(HttpStatusCode.ServiceUnavailable)]
+    [InlineData(HttpStatusCode.BadRequest)]
+    public async Task DispatchAsync_WhenNonSuccessStatusCode_ShouldReturnHttpErrorFailure(HttpStatusCode statusCode)
+    {
+        _handler.Handler = (req, ct) => Task.FromResult(new HttpResponseMessage(statusCode)
+        {
+            Content = new StringContent("{\"error\":\"upstream failure\"}")
+        });
+
+        var request = new ExternalDispatchRequest(
+            TargetUrl: new Uri("https://api.partner.com/webhook"),
+            Method: HttpMethod.Post,
+            Payload: "{}");
+
+        var result = await _sut.DispatchAsync(request);
+
+        result.IsFailure.Should().BeTrue();
+        result.Error.Code.Should().Be("Resilience.HttpError");
+        result.Error.Message.Should().Contain(((int)statusCode).ToString(System.Globalization.CultureInfo.InvariantCulture));
+    }
+
     public void Dispose()
     {
         _httpClient.Dispose();

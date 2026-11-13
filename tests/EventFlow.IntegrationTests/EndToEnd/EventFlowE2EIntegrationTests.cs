@@ -222,8 +222,9 @@ public sealed class EventFlowE2EIntegrationTests : IAsyncLifetime, IDisposable
         var results = await Task.WhenAll(tasks);
 
         // Assert
-        // Every invocation returns Success (either executed once, or skipped as AlreadyProcessed idempotently)
-        results.All(r => r.IsSuccess).Should().BeTrue();
+        // At least one invocation succeeds; concurrent overlapping callers return ConflictInFlight or AlreadyProcessed
+        results.Count(r => r.IsSuccess).Should().BeGreaterThanOrEqualTo(1);
+        results.Where(r => r.IsFailure).All(r => r.Error.Code == "Idempotency.ConflictInFlight").Should().BeTrue();
 
         // Exactly 1 record exists in PostgreSQL processed_events
         using var verifyScope = _factory.Services.CreateScope();

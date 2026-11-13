@@ -125,4 +125,48 @@ public class ProcessedEventTests
         result.IsFailure.Should().BeTrue();
         result.Error.Code.Should().Be("ProcessedEvent.EmptyEventType");
     }
+
+    [Fact]
+    public void MarkFailed_WhenAlreadyCompleted_ShouldReturnConflictAndPreserveCompletedStatus()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var record = ProcessedEvent.CreateProcessing(
+            tenantId: "tenant-1",
+            idempotencyKey: "key-1",
+            scope: "scope",
+            eventId: Guid.NewGuid(),
+            eventType: "payment.settled.v1",
+            lockToken: "token-1",
+            lockedUntilUtc: now.AddMinutes(1),
+            createdAt: now).Value;
+
+        var completedResult = record.MarkCompleted("token-1", "Done", now);
+        completedResult.IsSuccess.Should().BeTrue();
+
+        var failResult = record.MarkFailed("token-1");
+
+        failResult.IsFailure.Should().BeTrue();
+        failResult.Error.Code.Should().Be("ProcessedEvent.AlreadyCompleted");
+        record.Status.Should().Be(ProcessedEventStatus.Completed);
+    }
+
+    [Fact]
+    public void MarkCompleted_WhenEventTypeProvided_ShouldUpdatePlaceholderEventType()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var record = ProcessedEvent.CreateProcessing(
+            tenantId: "tenant-1",
+            idempotencyKey: "key-1",
+            scope: "scope",
+            eventId: Guid.NewGuid(),
+            eventType: "Unknown",
+            lockToken: "token-1",
+            lockedUntilUtc: now.AddMinutes(1),
+            createdAt: now).Value;
+
+        var result = record.MarkCompleted("token-1", "Done", now, "payment.settled.v1");
+
+        result.IsSuccess.Should().BeTrue();
+        record.EventType.Should().Be("payment.settled.v1");
+    }
 }

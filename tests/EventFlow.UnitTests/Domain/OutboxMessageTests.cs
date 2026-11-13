@@ -111,4 +111,32 @@ public class OutboxMessageTests
         outbox.NextRetryAt.Should().BeNull();
         outbox.ProcessedAt.Should().Be(now);
     }
+
+    [Fact]
+    public void MarkFailed_WhenAlreadyPublished_ShouldReturnConflictAndPreservePublishedStatus()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var outbox = OutboxMessage.FromEnvelope(CreateSampleEnvelope(), now);
+        outbox.MarkPublished(now);
+
+        var result = outbox.MarkFailed("Late error", maxRetries: 3, retryBackoff: TimeSpan.FromSeconds(2), now: now);
+
+        result.IsFailure.Should().BeTrue();
+        result.Error.Code.Should().Be("OutboxMessage.AlreadyPublished");
+        outbox.Status.Should().Be(OutboxStatus.Published);
+    }
+
+    [Fact]
+    public void MarkPublished_WhenClaimedWithLockTokenAndCalledWithEmptyToken_ShouldReturnLockMismatch()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var outbox = OutboxMessage.FromEnvelope(CreateSampleEnvelope(), now);
+        outbox.Claim("worker-token-1", now.AddSeconds(30)).IsSuccess.Should().BeTrue();
+
+        var result = outbox.MarkPublished(lockToken: null, publishedAt: now);
+
+        result.IsFailure.Should().BeTrue();
+        result.Error.Code.Should().Be("OutboxMessage.LockTokenMismatch");
+        outbox.Status.Should().Be(OutboxStatus.Processing);
+    }
 }

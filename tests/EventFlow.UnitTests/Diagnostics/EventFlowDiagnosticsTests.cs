@@ -19,6 +19,7 @@ public class EventFlowDiagnosticsTests
         EventFlowDiagnostics.EventProcessingDuration.Should().NotBeNull();
         EventFlowDiagnostics.OutboxDispatched.Should().NotBeNull();
         EventFlowDiagnostics.IdempotencyHits.Should().NotBeNull();
+        EventFlowDiagnostics.DlqMessages.Should().NotBeNull();
         EventFlowDiagnostics.DlqReplayed.Should().NotBeNull();
         EventFlowDiagnostics.DlqPurged.Should().NotBeNull();
     }

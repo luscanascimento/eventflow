@@ -76,6 +76,8 @@ public class IngestEventValidatorTests
     [InlineData("invalid-trace")]
     [InlineData("01-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01")] // Invalid version (must be 00)
     [InlineData("00-shorttrace-00f067aa0ba902b7-01")]
+    [InlineData("00-00000000000000000000000000000000-00f067aa0ba902b7-01")] // All-zero trace-id is invalid per W3C TraceContext
+    [InlineData("00-4bf92f3577b34da6a3ce929d0e0e4736-0000000000000000-01")] // All-zero parent-id is invalid per W3C TraceContext
     public async Task Validate_WithInvalidTraceParent_ShouldFail(string invalidTraceParent)
     {
         var command = CreateValidCommand(traceParent: invalidTraceParent);
@@ -94,5 +96,32 @@ public class IngestEventValidatorTests
         var result = await _validator.ValidateAsync(command);
 
         result.IsValid.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task Validate_WithNullFieldsAndUndefinedPayload_ShouldFailGracefullyWithoutThrowing()
+    {
+        var command = new IngestEventCommand(
+            EventId: null,
+            EventType: null!,
+            Version: 1,
+            Source: null!,
+            OccurredAt: null,
+            CorrelationId: new string('c', 129),
+            TraceParent: null,
+            TenantId: null!,
+            IdempotencyKey: null!,
+            Payload: default,
+            Metadata: null);
+
+        var result = await _validator.ValidateAsync(command);
+
+        result.IsValid.Should().BeFalse();
+        result.Errors.Should().Contain(e => e.PropertyName == nameof(IngestEventCommand.TenantId));
+        result.Errors.Should().Contain(e => e.PropertyName == nameof(IngestEventCommand.EventType));
+        result.Errors.Should().Contain(e => e.PropertyName == nameof(IngestEventCommand.Source));
+        result.Errors.Should().Contain(e => e.PropertyName == nameof(IngestEventCommand.IdempotencyKey));
+        result.Errors.Should().Contain(e => e.PropertyName == nameof(IngestEventCommand.CorrelationId));
+        result.Errors.Should().Contain(e => e.PropertyName == nameof(IngestEventCommand.Payload));
     }
 }

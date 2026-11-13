@@ -8,9 +8,9 @@ namespace EventFlow.UnitTests.Security;
 public class SsrfGuardTests
 {
     [Theory]
-    [InlineData("https://api.github.com/events")]
-    [InlineData("https://httpbin.org/post")]
-    [InlineData("http://example.com/webhook")]
+    [InlineData("https://8.8.8.8/events")]
+    [InlineData("https://1.1.1.1/post")]
+    [InlineData("http://93.184.216.34/webhook")]
     public void IsSafeTarget_WhenPublicHttpUrl_ShouldReturnTrue(string url)
     {
         bool isSafe = SsrfGuard.IsSafeTarget(new Uri(url));
@@ -33,10 +33,16 @@ public class SsrfGuardTests
     [Theory]
     [InlineData("http://localhost/webhook")]
     [InlineData("http://127.0.0.1/api")]
+    [InlineData("http://0.0.0.0/api")]
+    [InlineData("http://[::]/api")]
+    [InlineData("http://[::1]/api")]
+    [InlineData("http://[::127.0.0.1]/api")]
     [InlineData("http://10.0.0.1/admin")]
     [InlineData("http://192.168.1.1/internal")]
     [InlineData("http://172.16.0.1/secrets")]
     [InlineData("http://169.254.169.254/latest/meta-data/")]
+    [InlineData("http://100.100.100.200/latest/meta-data/")]
+    [InlineData("http://198.18.0.1/benchmark")]
     public void IsSafeTarget_WhenPrivateOrLoopback_ShouldReturnFalseByDefault(string url)
     {
         bool isSafe = SsrfGuard.IsSafeTarget(new Uri(url));
