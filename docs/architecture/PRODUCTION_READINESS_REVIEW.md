@@ -2,8 +2,8 @@
 
 > **Documento:** Relatório Técnico de Prontidão para Produção, Auditoria Adversarial e Engenharia de Caos  
 > **Nível:** Staff / Principal Software Engineer  
-> **Target Runtime:** .NET 9 STS (C# 13)  
-> **Status:** **PRODUCTION-HARDENED REFERENCE ARCHITECTURE** ✅ (211 Testes Automatizados [185 Unit/Chaos + 26 Integration], 0 Warnings)  
+> **Target Runtime:** .NET 10 LTS (C# 14)  
+> **Status:** **PRODUCTION-HARDENED REFERENCE ARCHITECTURE** ✅ (229 Testes Automatizados [202 Unit/Chaos + 27 Integration], 0 Warnings)  
 
 ---
 
@@ -22,7 +22,7 @@ O **EventFlow** foi submetido a uma auditoria arquitetural rigorosa e remediado 
 │  [x] SSRF & DNS Rebinding:          PASSED (SsrfGuard + SafeSocketsHttpHandler)  │
 │  [x] Fail-Closed Security:          PASSED (ValidateOnStart + constant-time hash)│
 │  [x] Probed Health Checks:          PASSED (/health/ready probes DB/MQ/Redis)    │
-│  [x] Test Suite:                    211 Tests (185 Unit/Chaos + 26 Integration)  │
+│  [x] Test Suite:                    229 Tests (202 Unit/Chaos + 27 Integration)  │
 │  [x] Code Quality:                  0 Warnings (TreatWarningsAsErrors=true)       │
 └──────────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -118,7 +118,7 @@ Embora a base técnica de software esteja completamente endurecida, um deploy re
 
 ## 7. Conclusão da Arquitetura
 
-O EventFlow atinge um nível exemplar de maturidade em engenharia de software distribuída em .NET 9:
+O EventFlow atinge um nível exemplar de maturidade em engenharia de software distribuída em .NET 10 LTS (C# 14):
 * Código 100% explícito, limpo e testável sem abstrações artificiais.
 * Concorrência protegida em todos os pontos críticos (`SKIP LOCKED`, Redis Lua Scripts, PostgreSQL Unique Constraints com status `Processing`).
 * Ciclo de vida de migrações isolado e executado antes de APIs e Workers.

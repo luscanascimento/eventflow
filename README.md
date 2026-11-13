@@ -1,12 +1,12 @@
 # EventFlow — Distributed Event-Driven Ingestion & Processing Platform in .NET
 
-[![.NET 9](https://img.shields.io/badge/.NET-9.0%20STS-purple.svg)](https://dotnet.microsoft.com/)
-[![C# 13](https://img.shields.io/badge/C%23-13.0-blue.svg)](https://learn.microsoft.com/dotnet/csharp/)
+[![.NET 10](https://img.shields.io/badge/.NET-10.0%20LTS-purple.svg)](https://dotnet.microsoft.com/)
+[![C# 14](https://img.shields.io/badge/C%23-14.0-blue.svg)](https://learn.microsoft.com/dotnet/csharp/)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-336791.svg)](https://www.postgresql.org/)
 [![RabbitMQ](https://img.shields.io/badge/RabbitMQ-3.13-FF6600.svg)](https://www.rabbitmq.com/)
 [![Redis](https://img.shields.io/badge/Redis-7-DC382D.svg)](https://redis.io/)
 [![OpenTelemetry](https://img.shields.io/badge/OpenTelemetry-Enabled-orange.svg)](https://opentelemetry.io/)
-[![Tests](https://img.shields.io/badge/Tests-211%20Total%20(185%20Unit%20%2B%2026%20Integration)-brightgreen.svg)]()
+[![Tests](https://img.shields.io/badge/Tests-229%20Total%20(202%20Unit%20%2B%2027%20Integration)-brightgreen.svg)]()
 [![Code Quality](https://img.shields.io/badge/Warnings-0%20(TreatAsErrors)-success.svg)]()
 
 > 🚀 **Status:** Production-hardened distributed event processing reference architecture with transactional outbox, atomic leasing, hybrid idempotency, and defense-in-depth security.
@@ -83,9 +83,9 @@ EventFlow resolves this challenge by enforcing strict, end-to-end architectural 
 
 ## 🛠️ Technology Stack
 
-* **Language & Runtime:** .NET 9 STS / C# 13 (`TreatWarningsAsErrors=true`).
+* **Language & Runtime:** .NET 10 LTS / C# 14 (`TreatWarningsAsErrors=true`).
 * **API & Hosting:** ASP.NET Core Minimal APIs & `BackgroundService` Worker Services.
-* **Relational Persistence:** PostgreSQL 16 with Entity Framework Core 9 (explicit relational mappings, composite indexes, and `SKIP LOCKED` CTE leasing).
+* **Relational Persistence:** PostgreSQL 16 with Entity Framework Core 10 (explicit relational mappings, composite indexes, and `SKIP LOCKED` CTE leasing).
 * **Database Migrations:** Dedicated `EventFlow.Migrator` standalone migration utility and orchestration container.
 * **Message Broker:** RabbitMQ 3.13 via official asynchronous driver `RabbitMQ.Client 7.x` with publisher confirmation tracking and unroutable return handling.
 * **Caching & Distributed Locks:** Redis 7 Alpine with `StackExchange.Redis` and atomic Lua scripts.
@@ -126,12 +126,12 @@ eventflow/
 │   ├── EventFlow.Api/               # HTTP endpoints, RateLimiting, SecurityHeaders, Kestrel config
 │   ├── EventFlow.Application/       # Use cases, interfaces, orchestration, and FluentValidation rules
 │   ├── EventFlow.Domain/            # Immutable entities, Result Pattern, typed domain errors, telemetry
-│   ├── EventFlow.Infrastructure/    # EF Core 9, RabbitMQ 7.x, Redis Lua Locks, Polly v8, OpenTelemetry
+│   ├── EventFlow.Infrastructure/    # EF Core 10, RabbitMQ 7.x, Redis Lua Locks, Polly v8, OpenTelemetry
 │   ├── EventFlow.Migrator/          # Standalone database migration runner with resilient retries
 │   └── EventFlow.Worker/            # BackgroundServices (OutboxDispatcherWorker & EventConsumerWorker)
 └── tests/
-    ├── EventFlow.UnitTests/         # 185 unit & chaos tests covering domain, application, and infrastructure
-    └── EventFlow.IntegrationTests/  # 26 integration tests utilizing Testcontainers and WebApplicationFactory
+    ├── EventFlow.UnitTests/         # 202 unit & chaos tests covering domain, application, and infrastructure
+    └── EventFlow.IntegrationTests/  # 27 integration tests utilizing Testcontainers and WebApplicationFactory
 ```
 
 ---
@@ -154,22 +154,23 @@ All core architectural decisions are formally documented in [`docs/adr/`](docs/a
 
 ### Option 1: Via Docker Compose (Recommended — Complete Environment)
 
-Spin up all services (PostgreSQL, RabbitMQ with Management UI, Redis, Jaeger UI, EventFlow.Migrator, EventFlow.Api, and EventFlow.Worker):
+Copy the environment template and spin up all services (PostgreSQL, RabbitMQ with Management UI, Redis, Jaeger UI, EventFlow.Migrator, EventFlow.Api, and EventFlow.Worker):
 
 ```bash
+cp .env.example .env
 docker compose up -d --build
 ```
 
 #### Exposed Ports & Management Interfaces:
 * **EventFlow.Api:** `http://localhost:8080`
-* **RabbitMQ Management UI:** `http://localhost:15672` (Username: `guest` / Password: `guest`)
+* **RabbitMQ Management UI:** `http://localhost:15672` (Username: `eventflow_rabbit` / Password: `eventflow_rabbit_pwd`)
 * **Jaeger OpenTelemetry UI:** `http://localhost:16686`
-* **PostgreSQL:** `localhost:5432` (Username: `eventflow` / Password: `eventflow_secret_pwd` / DB: `eventflow_db`)
+* **PostgreSQL:** `localhost:5432` (Username: `eventflow_user` / Password: `eventflow_dev_password_123` / DB: `eventflow_db`)
 * **Redis:** `localhost:6379`
 
 ---
 
-### Option 2: Local Execution via .NET 9 SDK
+### Option 2: Local Execution via .NET 10 SDK
 
 #### 1. Start the supporting infrastructure dependencies:
 ```bash
@@ -253,9 +254,9 @@ curl -i -X POST http://localhost:8080/api/v1/events \
 ```json
 {
   "eventId": "01918a22-4a7b-7212-8e2b-7c3e1e9f1a01",
-  "correlationId": "01918a22-4a7b-7212-8e2b-7c3e1e9f1a00",
   "status": "Accepted",
-  "occurredAt": "2026-09-01T21:00:00.000Z"
+  "correlationId": "01918a22-4a7b-7212-8e2b-7c3e1e9f1a00",
+  "ingestedAt": "2026-09-01T21:00:00.000Z"
 }
 ```
 
