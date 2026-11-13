@@ -65,6 +65,12 @@ public sealed class ProcessedEvent
             return Result.Failure<ProcessedEvent>(validation.Error);
         }
 
+        if (string.IsNullOrWhiteSpace(lockToken))
+        {
+            return Result.Failure<ProcessedEvent>(
+                DomainError.Validation("ProcessedEvent.EmptyLockToken", "LockToken cannot be empty."));
+        }
+
         return Result.Success(new ProcessedEvent(
             id: Guid.NewGuid(),
             tenantId: tenantId.Trim(),
@@ -121,6 +127,16 @@ public sealed class ProcessedEvent
             return Result.Failure(DomainError.Conflict("ProcessedEvent.AlreadyCompleted", "Cannot claim an already completed idempotency record."));
         }
 
+        if (string.IsNullOrWhiteSpace(lockToken))
+        {
+            return Result.Failure(DomainError.Validation("ProcessedEvent.EmptyLockToken", "LockToken cannot be empty."));
+        }
+
+        if (eventId == Guid.Empty)
+        {
+            return Result.Failure(DomainError.Validation("ProcessedEvent.InvalidEventId", "EventId must not be an empty GUID."));
+        }
+
         Status = ProcessedEventStatus.Processing;
         LockToken = lockToken;
         LockedUntilUtc = lockedUntilUtc;
@@ -133,7 +149,7 @@ public sealed class ProcessedEvent
         return Result.Success();
     }
 
-    public Result MarkCompleted(string? lockToken, string? resultSummary, DateTimeOffset completedAt)
+    public Result MarkCompleted(string? lockToken, string? resultSummary, DateTimeOffset completedAt, string? eventType = null)
     {
         if (Status == ProcessedEventStatus.Completed)
         {
@@ -143,6 +159,11 @@ public sealed class ProcessedEvent
         if (!string.IsNullOrEmpty(LockToken) && !string.Equals(LockToken, lockToken, StringComparison.Ordinal))
         {
             return Result.Failure(DomainError.Conflict("ProcessedEvent.LockTokenMismatch", "Lock token mismatch; cannot mark completed."));
+        }
+
+        if (!string.IsNullOrWhiteSpace(eventType))
+        {
+            EventType = eventType.Trim();
         }
 
         Status = ProcessedEventStatus.Completed;
@@ -155,6 +176,11 @@ public sealed class ProcessedEvent
 
     public Result MarkFailed(string? lockToken)
     {
+        if (Status == ProcessedEventStatus.Completed)
+        {
+            return Result.Failure(DomainError.Conflict("ProcessedEvent.AlreadyCompleted", "Cannot mark an already completed idempotency record as failed."));
+        }
+
         if (!string.IsNullOrEmpty(LockToken) && !string.Equals(LockToken, lockToken, StringComparison.Ordinal))
         {
             return Result.Failure(DomainError.Conflict("ProcessedEvent.LockTokenMismatch", "Lock token mismatch; cannot mark failed."));

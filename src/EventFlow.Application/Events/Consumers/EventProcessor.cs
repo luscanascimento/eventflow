@@ -98,59 +98,23 @@ public sealed partial class EventProcessor : IEventProcessor
                 $"Another worker is currently processing event '{context.EventId}' with idempotency key '{idempotencyKey}'."));
         }
 
+        Result result;
         try
         {
-            var result = await handler.HandleAsync(context, cancellationToken);
+            result = await handler.HandleAsync(context, cancellationToken);
             stopwatch.Stop();
 
             EventFlowDiagnostics.EventProcessingDuration.Record(
                 stopwatch.Elapsed.TotalMilliseconds,
                 new KeyValuePair<string, object?>("event_type", context.EventType));
-
-            if (result.IsSuccess)
-            {
-                await _idempotencyManager.MarkCompletedAsync(
-                    context.TenantId,
-                    idempotencyKey,
-                    scope,
-                    context.EventId,
-                    context.EventType,
-                    "Success",
-                    cancellationToken);
-
-                EventFlowDiagnostics.EventsProcessed.Add(
-                    1,
-                    new KeyValuePair<string, object?>("tenant_id", context.TenantId),
-                    new KeyValuePair<string, object?>("event_type", context.EventType),
-                    new KeyValuePair<string, object?>("status", "success"));
-
-                activity?.SetStatus(ActivityStatusCode.Ok);
-                LogEventProcessedSuccessfully(_logger, context.EventId, context.EventType);
-            }
-            else
-            {
-                await _idempotencyManager.ReleaseLockAsync(
-                    context.TenantId,
-                    idempotencyKey,
-                    scope,
-                    acquireResult.LockToken,
-                    cancellationToken);
-
-                EventFlowDiagnostics.EventsProcessed.Add(
-                    1,
-                    new KeyValuePair<string, object?>("tenant_id", context.TenantId),
-                    new KeyValuePair<string, object?>("event_type", context.EventType),
-                    new KeyValuePair<string, object?>("status", "failure"));
-
-                activity?.SetStatus(ActivityStatusCode.Error, result.Error.Message);
-                LogEventProcessingFailed(_logger, context.EventId, context.EventType, result.Error.Code, result.Error.Message);
-            }
-
-            return result;
         }
         catch (Exception ex)
         {
             stopwatch.Stop();
+
+            EventFlowDiagnostics.EventProcessingDuration.Record(
+                stopwatch.Elapsed.TotalMilliseconds,
+                new KeyValuePair<string, object?>("event_type", context.EventType));
 
             EventFlowDiagnostics.EventsProcessed.Add(
                 1,
@@ -163,12 +127,53 @@ public sealed partial class EventProcessor : IEventProcessor
                 idempotencyKey,
                 scope,
                 acquireResult.LockToken,
-                cancellationToken);
+                CancellationToken.None);
 
             activity?.SetStatus(ActivityStatusCode.Error, ex.Message);
             LogUnhandledExceptionDuringProcessing(_logger, context.EventId, context.EventType, ex);
             return Result.Failure(DomainError.Failure("EventProcessor.UnhandledException", ex.Message));
         }
+
+        if (result.IsSuccess)
+        {
+            await _idempotencyManager.MarkCompletedAsync(
+                context.TenantId,
+                idempotencyKey,
+                scope,
+                context.EventId,
+                context.EventType,
+                "Success",
+                CancellationToken.None);
+
+            EventFlowDiagnostics.EventsProcessed.Add(
+                1,
+                new KeyValuePair<string, object?>("tenant_id", context.TenantId),
+                new KeyValuePair<string, object?>("event_type", context.EventType),
+                new KeyValuePair<string, object?>("status", "success"));
+
+            activity?.SetStatus(ActivityStatusCode.Ok);
+            LogEventProcessedSuccessfully(_logger, context.EventId, context.EventType);
+        }
+        else
+        {
+            await _idempotencyManager.ReleaseLockAsync(
+                context.TenantId,
+                idempotencyKey,
+                scope,
+                acquireResult.LockToken,
+                CancellationToken.None);
+
+            EventFlowDiagnostics.EventsProcessed.Add(
+                1,
+                new KeyValuePair<string, object?>("tenant_id", context.TenantId),
+                new KeyValuePair<string, object?>("event_type", context.EventType),
+                new KeyValuePair<string, object?>("status", "failure"));
+
+            activity?.SetStatus(ActivityStatusCode.Error, result.Error.Message);
+            LogEventProcessingFailed(_logger, context.EventId, context.EventType, result.Error.Code, result.Error.Message);
+        }
+
+        return result;
     }
 
     [LoggerMessage(EventId = 7001, Level = LogLevel.Information, Message = "Processing consumed event {EventId} of type '{EventType}' for tenant '{TenantId}'")]

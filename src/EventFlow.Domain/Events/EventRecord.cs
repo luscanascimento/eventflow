@@ -24,6 +24,8 @@ public sealed class EventRecord
 
     public static EventRecord FromEnvelope(EventEnvelope envelope, DateTimeOffset ingestedAt)
     {
+        ArgumentNullException.ThrowIfNull(envelope);
+
         return new EventRecord
         {
             Id = Guid.NewGuid(),

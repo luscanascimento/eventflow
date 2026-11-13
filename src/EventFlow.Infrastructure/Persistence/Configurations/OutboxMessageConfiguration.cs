@@ -52,7 +52,12 @@ public sealed class OutboxMessageConfiguration : IEntityTypeConfiguration<Outbox
 
         builder.Property(o => o.LockToken)
             .HasColumnName("lock_token")
-            .HasMaxLength(64);
+            .HasMaxLength(64)
+            .IsConcurrencyToken();
+
+        builder.Ignore(o => o.IdempotencyKey);
+        builder.Ignore(o => o.CorrelationId);
+        builder.Ignore(o => o.Version);
 
         builder.Property(o => o.LockedUntilUtc)
             .HasColumnName("locked_until_utc");

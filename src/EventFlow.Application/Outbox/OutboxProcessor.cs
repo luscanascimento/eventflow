@@ -57,6 +57,8 @@ public sealed partial class OutboxProcessor
         using var batchActivity = EventFlowDiagnostics.ActivitySource.StartActivity("EventFlow.OutboxBatchDispatch");
         batchActivity?.SetTag("eventflow.outbox.batch_size", messages.Count);
 
+        int processedCount = 0;
+
         foreach (var message in messages)
         {
             if (cancellationToken.IsCancellationRequested)
@@ -69,14 +71,25 @@ public sealed partial class OutboxProcessor
             {
                 publishResult = await _publisher.PublishAsync(message, cancellationToken);
             }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                break;
+            }
             catch (Exception ex)
             {
                 publishResult = Result.Failure(DomainError.Failure("Publisher.Exception", ex.Message));
             }
 
+            processedCount++;
+
             if (publishResult.IsSuccess)
             {
-                var markResult = await _outboxStore.MarkPublishedAsync(message.Id, lockToken, _dateTimeProvider.UtcNow, cancellationToken);
+                var markResult = await _outboxStore.MarkPublishedAsync(
+                    message.Id,
+                    lockToken,
+                    _dateTimeProvider.UtcNow,
+                    CancellationToken.None);
+
                 if (markResult.IsSuccess)
                 {
                     EventFlowDiagnostics.OutboxDispatched.Add(
@@ -93,26 +106,34 @@ public sealed partial class OutboxProcessor
             }
             else
             {
+                int nextAttemptNumber = message.RetryCount + 1;
                 var backoff = CalculateExponentialBackoff(message.RetryCount);
+                DateTimeOffset failedAt = _dateTimeProvider.UtcNow;
+
                 var markResult = await _outboxStore.MarkFailedAsync(
                     message.Id,
                     lockToken,
                     publishResult.Error.Message,
                     _options.MaxRetries,
                     backoff,
-                    _dateTimeProvider.UtcNow,
-                    cancellationToken);
+                    failedAt,
+                    CancellationToken.None);
 
                 if (markResult.IsSuccess)
                 {
-                    if (message.RetryCount + 1 >= _options.MaxRetries)
+                    if (nextAttemptNumber >= _options.MaxRetries)
                     {
                         EventFlowDiagnostics.OutboxDispatched.Add(
                             1,
                             new KeyValuePair<string, object?>("status", "dead_lettered"),
                             new KeyValuePair<string, object?>("event_type", message.EventType));
 
-                        LogMessageDeadLettered(_logger, message.Id, message.EventType, publishResult.Error.Message, message.RetryCount + 1);
+                        EventFlowDiagnostics.DlqMessages.Add(
+                            1,
+                            new KeyValuePair<string, object?>("source", "outbox"),
+                            new KeyValuePair<string, object?>("event_type", message.EventType));
+
+                        LogMessageDeadLettered(_logger, message.Id, message.EventType, publishResult.Error.Message, nextAttemptNumber);
                     }
                     else
                     {
@@ -121,7 +142,7 @@ public sealed partial class OutboxProcessor
                             new KeyValuePair<string, object?>("status", "failed_retry"),
                             new KeyValuePair<string, object?>("event_type", message.EventType));
 
-                        LogMessageFailedAndScheduledRetry(_logger, message.Id, message.EventType, publishResult.Error.Message, message.RetryCount + 1, now.Add(backoff));
+                        LogMessageFailedAndScheduledRetry(_logger, message.Id, message.EventType, publishResult.Error.Message, nextAttemptNumber, failedAt.Add(backoff));
                     }
                 }
                 else
@@ -131,8 +152,8 @@ public sealed partial class OutboxProcessor
             }
         }
 
-        LogBatchProcessingFinished(_logger, messages.Count);
-        return messages.Count;
+        LogBatchProcessingFinished(_logger, processedCount);
+        return processedCount;
     }
 
     private TimeSpan CalculateExponentialBackoff(int retryCount)

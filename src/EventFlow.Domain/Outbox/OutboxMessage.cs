@@ -16,6 +16,9 @@ public sealed class OutboxMessage
     public string RoutingKey { get; private set; } = string.Empty;
     public string Payload { get; private set; } = string.Empty;
     public string? TraceParent { get; private set; }
+    public string? IdempotencyKey { get; private set; }
+    public string? CorrelationId { get; private set; }
+    public int Version { get; private set; } = 1;
     public OutboxStatus Status { get; private set; }
     public string? LockToken { get; private set; }
     public DateTimeOffset? LockedUntilUtc { get; private set; }
@@ -30,6 +33,8 @@ public sealed class OutboxMessage
 
     public static OutboxMessage FromEnvelope(EventEnvelope envelope, DateTimeOffset createdAt)
     {
+        ArgumentNullException.ThrowIfNull(envelope);
+
         return new OutboxMessage
         {
             Id = Guid.NewGuid(),
@@ -39,10 +44,31 @@ public sealed class OutboxMessage
             RoutingKey = envelope.EventType,
             Payload = envelope.Payload,
             TraceParent = envelope.TraceParent,
+            IdempotencyKey = envelope.IdempotencyKey,
+            CorrelationId = envelope.CorrelationId,
+            Version = envelope.Version,
             Status = OutboxStatus.Pending,
             CreatedAt = createdAt,
             RetryCount = 0
         };
+    }
+
+    public void EnrichEnvelopeMetadata(string? idempotencyKey, string? correlationId, int version)
+    {
+        if (!string.IsNullOrWhiteSpace(idempotencyKey))
+        {
+            IdempotencyKey = idempotencyKey;
+        }
+
+        if (!string.IsNullOrWhiteSpace(correlationId))
+        {
+            CorrelationId = correlationId;
+        }
+
+        if (version >= 1)
+        {
+            Version = version;
+        }
     }
 
     public Result Claim(string lockToken, DateTimeOffset lockedUntil)
@@ -50,6 +76,16 @@ public sealed class OutboxMessage
         if (Status == OutboxStatus.Published)
         {
             return Result.Failure(DomainError.Conflict("OutboxMessage.AlreadyPublished", "Cannot claim an already published message."));
+        }
+
+        if (Status == OutboxStatus.DeadLettered)
+        {
+            return Result.Failure(DomainError.Conflict("OutboxMessage.AlreadyDeadLettered", "Cannot claim an already dead-lettered message."));
+        }
+
+        if (string.IsNullOrWhiteSpace(lockToken))
+        {
+            return Result.Failure(DomainError.Validation("OutboxMessage.EmptyLockToken", "LockToken cannot be empty."));
         }
 
         Status = OutboxStatus.Processing;
@@ -96,14 +132,19 @@ public sealed class OutboxMessage
         return Result.Success();
     }
 
-    public void MarkFailed(string error, int maxRetries, TimeSpan retryBackoff, DateTimeOffset now)
+    public Result MarkFailed(string error, int maxRetries, TimeSpan retryBackoff, DateTimeOffset now)
     {
-        MarkFailed(LockToken, error, maxRetries, retryBackoff, now);
+        return MarkFailed(LockToken, error, maxRetries, retryBackoff, now);
     }
 
     public Result MarkFailed(string? lockToken, string error, int maxRetries, TimeSpan retryBackoff, DateTimeOffset now)
     {
-        if (!string.IsNullOrEmpty(LockToken) && !string.IsNullOrEmpty(lockToken) && !string.Equals(LockToken, lockToken, StringComparison.Ordinal))
+        if (Status == OutboxStatus.Published)
+        {
+            return Result.Failure(DomainError.Conflict("OutboxMessage.AlreadyPublished", "Cannot mark an already published message as failed."));
+        }
+
+        if (!string.IsNullOrEmpty(LockToken) && !string.Equals(LockToken, lockToken, StringComparison.Ordinal))
         {
             return Result.Failure(DomainError.Conflict("OutboxMessage.LockTokenMismatch", "Lock token mismatch; cannot mark failed."));
         }

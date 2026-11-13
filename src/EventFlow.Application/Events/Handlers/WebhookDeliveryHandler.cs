@@ -87,6 +87,14 @@ public sealed partial class WebhookDeliveryHandler : IEventConsumerHandler
             return Result.Failure(dispatchResult.Error);
         }
 
+        if (dispatchResult.Value.StatusCode is < 200 or >= 300)
+        {
+            string errorMessage = $"Downstream webhook endpoint returned HTTP {dispatchResult.Value.StatusCode}.";
+            LogWebhookDeliveryFailed(_logger, context.EventId, targetUri.Host, errorMessage);
+            return Result.Failure(
+                DomainError.Failure("WebhookDelivery.DownstreamError", errorMessage));
+        }
+
         LogWebhookDeliverySuccess(_logger, context.EventId, targetUri.Host, dispatchResult.Value.StatusCode);
         return Result.Success();
     }

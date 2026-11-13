@@ -107,7 +107,9 @@ public sealed class EventEnvelope
                 DomainError.Validation("EventEnvelope.EmptyPayload", "Payload cannot be empty."));
         }
 
-        var meta = metadata ?? new Dictionary<string, string>();
+        var meta = metadata is null
+            ? new Dictionary<string, string>().AsReadOnly()
+            : new Dictionary<string, string>(metadata).AsReadOnly();
 
         return Result.Success(new EventEnvelope(
             eventId,

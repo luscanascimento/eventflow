@@ -49,7 +49,8 @@ public sealed class ProcessedEventConfiguration : IEntityTypeConfiguration<Proce
 
         builder.Property(e => e.LockToken)
             .HasColumnName("lock_token")
-            .HasMaxLength(64);
+            .HasMaxLength(64)
+            .IsConcurrencyToken();
 
         builder.Property(e => e.LockedUntilUtc)
             .HasColumnName("locked_until_utc");

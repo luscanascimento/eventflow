@@ -49,6 +49,11 @@ public static class EventFlowDiagnostics
         unit: "{hit}",
         description: "Total number of duplicate events intercepted by idempotency guards");
 
+    public static readonly Counter<long> DlqMessages = Meter.CreateCounter<long>(
+        name: "eventflow.dlq.messages",
+        unit: "{message}",
+        description: "Total number of messages routed to the dead letter queue");
+
     public static readonly Counter<long> DlqReplayed = Meter.CreateCounter<long>(
         name: "eventflow.dlq.replayed",
         unit: "{message}",
