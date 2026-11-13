@@ -1,19 +1,15 @@
 # ==============================================================================
 # Stage 1: Build & Publish (Multi-Stage SDK)
 # ==============================================================================
-FROM mcr.microsoft.com/dotnet/sdk:9.0-alpine AS build
+FROM mcr.microsoft.com/dotnet/sdk:10.0-alpine AS build
 WORKDIR /src
 
-# Copy solution and project files first to maximize Docker layer caching
+# Copy build configuration and project files first to maximize Docker layer caching
 COPY Directory.Build.props ./
-COPY EventFlow.sln ./
 COPY src/EventFlow.Domain/EventFlow.Domain.csproj src/EventFlow.Domain/
 COPY src/EventFlow.Application/EventFlow.Application.csproj src/EventFlow.Application/
 COPY src/EventFlow.Infrastructure/EventFlow.Infrastructure.csproj src/EventFlow.Infrastructure/
-COPY src/EventFlow.Worker/EventFlow.Worker.csproj src/EventFlow.Worker/
 COPY src/EventFlow.Api/EventFlow.Api.csproj src/EventFlow.Api/
-COPY tests/EventFlow.UnitTests/EventFlow.UnitTests.csproj tests/EventFlow.UnitTests/
-COPY tests/EventFlow.IntegrationTests/EventFlow.IntegrationTests.csproj tests/EventFlow.IntegrationTests/
 
 # Restore dependencies
 RUN dotnet restore src/EventFlow.Api/EventFlow.Api.csproj
@@ -33,7 +29,7 @@ RUN dotnet publish src/EventFlow.Api/EventFlow.Api.csproj \
 # ==============================================================================
 # Stage 2: Hardened Non-Root Runtime
 # ==============================================================================
-FROM mcr.microsoft.com/dotnet/aspnet:9.0-alpine AS final
+FROM mcr.microsoft.com/dotnet/aspnet:10.0-alpine AS final
 WORKDIR /app
 
 # Install required globalization and timezone libraries

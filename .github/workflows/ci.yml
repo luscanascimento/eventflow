@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   build-test-quality:
-    name: Build, Lint & Test (.NET 9)
+    name: Build, Lint & Test (.NET 10)
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
@@ -19,10 +19,10 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Setup .NET 9 SDK
+      - name: Setup .NET 10 SDK
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: '9.0.x'
+          dotnet-version: '10.0.x'
 
       - name: Cache NuGet Packages
         uses: actions/cache@v4
@@ -59,7 +59,13 @@ jobs:
           --logger "trx;LogFileName=integration_tests.trx"
 
       - name: Security Audit (Vulnerable Package Scan)
-        run: dotnet list package --vulnerable --include-transitive
+        run: |
+          OUTPUT=$(dotnet list package --vulnerable --include-transitive)
+          echo "$OUTPUT"
+          if echo "$OUTPUT" | grep -q "has the following vulnerable packages"; then
+            echo "::error::Vulnerable NuGet packages detected!"
+            exit 1
+          fi
 
   docker-build-validation:
     name: Validate Multi-Stage Docker Builds

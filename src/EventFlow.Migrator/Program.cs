@@ -5,7 +5,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 
 var configuration = new ConfigurationBuilder()
-    .SetBasePath(Directory.GetCurrentDirectory())
+    .SetBasePath(AppContext.BaseDirectory)
     .AddJsonFile("appsettings.json", optional: true)
     .AddEnvironmentVariables()
     .Build();
@@ -33,7 +33,7 @@ services.AddDbContext<EventFlowDbContext>(options =>
     });
 });
 
-var serviceProvider = services.BuildServiceProvider();
+await using var serviceProvider = services.BuildServiceProvider();
 var logger = serviceProvider.GetRequiredService<ILogger<Program>>();
 
 MigrationLoggers.LogStarting(logger);
@@ -46,26 +46,20 @@ for (int attempt = 1; attempt <= maxAttempts; attempt++)
 {
     try
     {
-        using var scope = serviceProvider.CreateScope();
+        await using var scope = serviceProvider.CreateAsyncScope();
         var dbContext = scope.ServiceProvider.GetRequiredService<EventFlowDbContext>();
 
         MigrationLoggers.LogTestingConnectivity(logger, attempt, maxAttempts);
-        bool canConnect = await dbContext.Database.CanConnectAsync(cancellationToken);
-        if (!canConnect)
-        {
-            MigrationLoggers.LogDbNotReady(logger);
-            await Task.Delay(3000, cancellationToken);
-            continue;
-        }
 
         var pendingMigrations = (await dbContext.Database.GetPendingMigrationsAsync(cancellationToken)).ToList();
         if (pendingMigrations.Count == 0)
         {
+            await dbContext.Database.MigrateAsync(cancellationToken);
             MigrationLoggers.LogAlreadyUpToDate(logger);
         }
         else
         {
-            MigrationLoggers.LogApplyingMigrations(logger, pendingMigrations.Count, string.Join(", ", pendingMigrations));
+            MigrationLoggers.LogApplyingMigrations(logger, pendingMigrations.Count, pendingMigrations);
             await dbContext.Database.MigrateAsync(cancellationToken);
             MigrationLoggers.LogMigrationsApplied(logger);
         }
@@ -76,7 +70,14 @@ for (int attempt = 1; attempt <= maxAttempts; attempt++)
     catch (Exception ex) when (attempt < maxAttempts && !cancellationToken.IsCancellationRequested)
     {
         MigrationLoggers.LogAttemptFailed(logger, attempt, ex);
-        await Task.Delay(3000, cancellationToken);
+        try
+        {
+            await Task.Delay(3000, cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+            break;
+        }
     }
     catch (Exception ex)
     {
@@ -105,7 +106,7 @@ internal static partial class MigrationLoggers
     public static partial void LogAlreadyUpToDate(ILogger logger);
 
     [LoggerMessage(EventId = 105, Level = LogLevel.Information, Message = "Applying {Count} pending migrations: {Migrations}")]
-    public static partial void LogApplyingMigrations(ILogger logger, int count, string migrations);
+    public static partial void LogApplyingMigrations(ILogger logger, int count, IEnumerable<string> migrations);
 
     [LoggerMessage(EventId = 106, Level = LogLevel.Information, Message = "Successfully applied all pending migrations.")]
     public static partial void LogMigrationsApplied(ILogger logger);
